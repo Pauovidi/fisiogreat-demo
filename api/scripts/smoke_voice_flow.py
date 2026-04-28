@@ -11,16 +11,15 @@ from app.utils.mini_context import CTX
 
 def main():
     client = TestClient(app)
-    call_sid = "smoke-voice-1"
+    call_sid = "smoke-voice-fisiogreat-1"
     CTX.clear(call_sid)
 
     sequence = [
         {},
-        {"SpeechResult": "corte"},
-        {"SpeechResult": "sábado"},
+        {"SpeechResult": "sesion de fisioterapia"},
+        {"SpeechResult": "jueves por la tarde"},
         {"Digits": "1"},
         {"SpeechResult": "cual es el horario"},
-        {"SpeechResult": "ruido raro"},
     ]
 
     for step, payload in enumerate(sequence, start=1):

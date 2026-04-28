@@ -11,7 +11,7 @@ from app.utils.mini_context import CTX
 
 def main():
     client = TestClient(app)
-    call_sid = "smoke-conversationrelay-1"
+    call_sid = "smoke-conversationrelay-fisiogreat-1"
     CTX.clear(call_sid)
 
     twiml_response = client.post("/webhook/voice/conversationrelay")
@@ -22,8 +22,8 @@ def main():
     print("\nWebSocket flow")
     with client.websocket_connect("/webhook/voice/conversationrelay/ws") as websocket:
         steps = [
-            {"type": "setup", "sessionId": "VX-smoke-conversationrelay-1", "callSid": call_sid},
-            {"type": "prompt", "voicePrompt": "peinado", "last": True},
+            {"type": "setup", "sessionId": "VX-smoke-fisiogreat-1", "callSid": call_sid},
+            {"type": "prompt", "voicePrompt": "valoracion inicial", "last": True},
             {"type": "prompt", "voicePrompt": "jueves", "last": True},
             {"type": "prompt", "voicePrompt": "segunda", "last": True},
         ]
