@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+.env
+.env.*
+.git/
+.gitignore
+dist/
+build/
+node_modules/
+openai.txt
+*.json
