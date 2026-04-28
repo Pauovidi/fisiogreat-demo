@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config.settings import settings
 
-app = FastAPI(title="Pelu Agent API", version="1.0.0")
+app = FastAPI(title="FisioGreat Demo API", version="1.0.0")
 
 # Evita normalizaciones automáticas
 app.router.redirect_slashes = False
