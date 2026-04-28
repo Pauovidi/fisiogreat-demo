@@ -4,7 +4,13 @@ class ServiceCatalog:
     durations = {
         "corte": 30, "corte mujer": 30, "corte hombre": 30,
         "corte + lavado": 45, "color": 90, "color raíz": 75, "color raiz": 75,
-        "mechas": 90, "peinado": 30
+        "mechas": 90, "peinado": 30,
+        "primera visita de fisioterapia": 60,
+        "sesion de fisioterapia": 45,
+        "sesión de fisioterapia": 45,
+        "valoracion inicial": 60,
+        "valoración inicial": 60,
+        "consulta de seguimiento": 30,
     }
 
 class BusinessRules:

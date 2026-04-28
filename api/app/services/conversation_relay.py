@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from ..utils.date_parser import parse_spanish_day, parse_time_pref
+from ..utils.emergency_guard import detect_emergency, emergency_reply
 from ..utils.intent_router import detect_service, route_message
 from ..utils.logger import logger
 from ..utils.mini_context import CTX
@@ -11,6 +12,8 @@ from ..utils.slot_picker import pick_slot
 from ..utils.voice_copy import VOICE_COPY as copy
 from .natural_turn import maybe_handle_natural_turn
 from .salon_knowledge import out_of_scope_answer
+from .booking_service import confirm_slot, parse_slot_label
+from . import supabase_repo
 
 
 CR_SLOT_PAGE_SIZE = 2
@@ -96,6 +99,22 @@ def handle_interrupt_message(session: ConversationRelaySession, payload: Dict[st
 
 async def _handle_user_input(key: str, user_text: str) -> str:
     current_stage = CTX.get_stage(key)
+    emergency = detect_emergency(user_text)
+    if emergency.detected:
+        CTX.clear_flow(key)
+        CTX.set_stage(key, "emergency_detected")
+        try:
+            await supabase_repo.update_conversation_session(
+                key,
+                channel="voice",
+                external_user_id=key,
+                emergency_detected=True,
+                emergency_match=emergency.matched,
+            )
+        except Exception as exc:
+            logger.warning(f"conversationrelay_emergency_session_mark_failed key={key!r} error={exc!r}")
+        return emergency_reply("voice")
+
     route_peek = route_message(user_text)
 
     if current_stage == "completed":
@@ -189,14 +208,26 @@ async def _handle_user_input(key: str, user_text: str) -> str:
         reparsed_date = parse_spanish_day(user_text)
         reparsed_time = parse_time_pref(user_text)
         route_peek = route_message(user_text)
+        ctx = CTX.get(key) or {}
 
         if selected:
+            service = ctx.get("service") or "sesion de fisioterapia"
+            selected_dt = parse_slot_label(selected)
+            if selected_dt:
+                booking_result = await confirm_slot(
+                    channel="voice",
+                    external_user_id=key,
+                    service_type=service,
+                    start_at=selected_dt,
+                    metadata={"slot_label": selected, "transport": "conversationrelay"},
+                )
+                if not booking_result.ok:
+                    return "Ese hueco acaba de ocuparse. Te digo otras opciones."
             CTX.clear_flow(key)
             CTX.set_last_confirmed_slot(key, selected)
             CTX.set_stage(key, "completed")
             return copy.confirm_booking(selected)
 
-        ctx = CTX.get(key) or {}
         service = ctx.get("service")
         date_pref = ctx.get("date_pref")
         current_pref = ctx.get("time_pref")

@@ -3,12 +3,18 @@ from typing import Optional
 from ..config.settings import settings
 
 
-DEFAULT_LOCATION = "Calle Mayor 25, Madrid"
-DEFAULT_HOURS = "Lunes a viernes 09:00-19:00 | Sabado 09:00-14:00 | Domingo cerrado"
-DEFAULT_SERVICES = "corte, corte y lavado, color, color raiz, mechas y peinado"
-DEFAULT_PRICE_GUIDANCE = "Depende del servicio y del largo del pelo."
+DEFAULT_LOCATION = "ubicacion pendiente de configurar"
+DEFAULT_HOURS = "Lunes a viernes 09:00-20:00 | Sabado 10:00-14:00 | Domingo cerrado"
+DEFAULT_SERVICES = "primera visita de fisioterapia, sesion de fisioterapia, valoracion inicial, consulta de seguimiento"
+DEFAULT_PRICE_GUIDANCE = "Los precios orientativos se configuraran en la ficha de la clinica."
 
 SERVICE_DURATION_HINTS = {
+    "primera visita de fisioterapia": "La primera visita suele durar unos 60 minutos.",
+    "sesion de fisioterapia": "Una sesion de fisioterapia suele durar unos 45 minutos.",
+    "sesión de fisioterapia": "Una sesion de fisioterapia suele durar unos 45 minutos.",
+    "valoracion inicial": "La valoracion inicial suele durar unos 60 minutos.",
+    "valoración inicial": "La valoracion inicial suele durar unos 60 minutos.",
+    "consulta de seguimiento": "La consulta de seguimiento suele durar unos 30 minutos.",
     "corte": "Un corte suele tardar entre 30 y 45 minutos.",
     "corte + lavado": "Un corte con lavado suele tardar entre 30 y 45 minutos.",
     "corte y lavado": "Un corte con lavado suele tardar entre 30 y 45 minutos.",
@@ -20,33 +26,33 @@ SERVICE_DURATION_HINTS = {
 
 
 def salon_hours() -> str:
-    return (settings.SALON_HOURS or DEFAULT_HOURS).strip()
+    return (settings.CLINIC_HOURS or settings.SALON_HOURS or DEFAULT_HOURS).strip()
 
 
 def salon_location() -> str:
-    return (settings.SALON_LOCATION or DEFAULT_LOCATION).strip()
+    return (settings.CLINIC_LOCATION or settings.SALON_LOCATION or DEFAULT_LOCATION).strip()
 
 
 def salon_phone() -> Optional[str]:
-    phone = (settings.SALON_PHONE or "").strip()
+    phone = (settings.CLINIC_PHONE or settings.HUMAN_HANDOFF_PHONE or settings.SALON_PHONE or "").strip()
     return phone or None
 
 
 def salon_services() -> str:
-    return (settings.SALON_SERVICES or DEFAULT_SERVICES).strip()
+    return (settings.FISIO_SERVICES or settings.SALON_SERVICES or DEFAULT_SERVICES).strip()
 
 
 def salon_price_guidance() -> str:
-    guidance = (settings.SALON_PRICE_GUIDANCE or DEFAULT_PRICE_GUIDANCE).strip()
+    guidance = (settings.FISIO_PRICE_GUIDANCE or settings.SALON_PRICE_GUIDANCE or DEFAULT_PRICE_GUIDANCE).strip()
     return guidance or DEFAULT_PRICE_GUIDANCE
 
 
 def service_duration_hint(service: Optional[str]) -> str:
     if not service:
-        return "Un corte suele tardar entre 30 y 45 minutos, y color o mechas suelen necesitar mas tiempo."
+        return "Las sesiones suelen durar entre 30 y 60 minutos segun el tipo de cita."
     return SERVICE_DURATION_HINTS.get(
         service,
-        "Un corte suele tardar entre 30 y 45 minutos, y color o mechas suelen necesitar mas tiempo.",
+        "Las sesiones suelen durar entre 30 y 60 minutos segun el tipo de cita.",
     )
 
 
@@ -66,14 +72,14 @@ def faq_answer(faq_id: str, channel: str) -> Optional[str]:
 
 def out_of_scope_answer(channel: str) -> str:
     if channel == "voice":
-        return "Puedo ayudarte con citas, horarios y servicios."
-    return "Puedo ayudarte con citas, horarios, servicios y dudas basicas del salon."
+        return "Puedo ayudarte con citas de fisioterapia, horarios y dudas basicas de la clinica."
+    return "Puedo ayudarte con citas de fisioterapia, horarios, servicios y dudas basicas de la clinica."
 
 
 def uncertain_service_answer(channel: str) -> str:
     if channel == "voice":
-        return "No pasa nada. Podemos empezar por corte, color, mechas o peinado."
-    return "No pasa nada. Podemos empezar por corte, color, mechas o peinado."
+        return "No pasa nada. Podemos empezar por primera visita, sesion de fisioterapia o seguimiento."
+    return "No pasa nada. Podemos empezar por primera visita, sesion de fisioterapia o seguimiento."
 
 
 def structured_facts() -> dict[str, str]:
@@ -88,7 +94,7 @@ def structured_facts() -> dict[str, str]:
 
 def _hours_answer(channel: str) -> str:
     if channel == "voice":
-        return "Abrimos de lunes a viernes de nueve a siete, y sabados por la manana."
+        return "Abrimos de lunes a viernes de nueve a ocho, y sabados por la manana."
     return f"Nuestro horario es {salon_hours()}."
 
 
@@ -101,13 +107,13 @@ def _location_answer(channel: str) -> str:
 
 def _pricing_answer(channel: str) -> str:
     if channel == "voice":
-        return "Depende del servicio y del largo del pelo. Para orientarte mejor, dime que te quieres hacer."
-    return f"{salon_price_guidance()} Para orientarte mejor, dime que te quieres hacer."
+        return "Los precios orientativos dependen del tipo de sesion. Si quieres, dime que necesitas y te oriento."
+    return f"{salon_price_guidance()} Para orientarte mejor, dime que necesitas."
 
 
 def _services_answer(channel: str) -> str:
     if channel == "voice":
-        return "Hacemos corte, color, mechas y peinado."
+        return "Atendemos primera visita, sesion de fisioterapia, valoracion inicial y seguimiento."
     return f"Hacemos {salon_services()}."
 
 
@@ -115,5 +121,5 @@ def _human_answer(channel: str) -> str:
     del channel
     phone = salon_phone()
     if phone:
-        return f"Sin problema. Te dejo el telefono del salon, {phone}, o aviso para que te llamen."
-    return "Sin problema. Te dejo el telefono del salon o aviso para que te llamen."
+        return f"Sin problema. Te dejo el telefono de la clinica, {phone}, o aviso para que te llamen."
+    return "Sin problema. Te dejo el telefono de la clinica o aviso para que te llamen."

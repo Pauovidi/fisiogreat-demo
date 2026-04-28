@@ -16,11 +16,14 @@ from ..services.conversation_relay import (
     handle_prompt_message,
     handle_setup_message,
 )
+from ..services import supabase_repo
+from ..services.booking_service import confirm_slot, parse_slot_label
 from ..services.natural_turn import maybe_handle_natural_turn
 from ..services.salon_knowledge import out_of_scope_answer
 from ..services.slots import BusinessRules, propose_slots
 from ..utils.date_parser import parse_spanish_day, parse_time_pref
 from ..utils.intent_router import detect_service, route_message
+from ..utils.emergency_guard import detect_emergency, emergency_reply
 from ..utils.logger import logger
 from ..utils.mini_context import CTX
 from ..utils.slot_picker import pick_slot
@@ -31,7 +34,7 @@ router = APIRouter(prefix="/webhook/voice", tags=["voice"])
 
 VOICE_PAGE_SIZE = 2
 VOICE_HINTS = (
-    "corte, peinado, color, lavado, mechas, corte y lavado, "
+    "fisioterapia, fisio, primera visita, valoracion inicial, valoracion, seguimiento, sesion, "
     "lunes, martes, miércoles, miercoles, jueves, viernes, sábado, sabado, domingo, "
     "mañana, manana, pasado mañana, pasado manana, tarde, primera, segunda, uno, dos"
 )
@@ -387,6 +390,24 @@ async def agent_entry(
         logger.info(f"voice_input call_sid={CallSid!r} raw={user_text!r} normalized={normalized!r}")
 
         current_stage = CTX.get_stage(CallSid)
+        emergency = detect_emergency(user_text)
+        if emergency.detected:
+            stats["branch"] = "emergency_detected"
+            CTX.clear_flow(CallSid)
+            CTX.set_stage(CallSid, "emergency_detected")
+            try:
+                await supabase_repo.update_conversation_session(
+                    CallSid,
+                    channel="voice",
+                    external_user_id=CallSid,
+                    emergency_detected=True,
+                    emergency_match=emergency.matched,
+                )
+            except Exception as exc:
+                logger.warning(f"voice_emergency_session_mark_failed call_sid={CallSid!r} error={exc!r}")
+            stats["stage_after"] = "emergency_detected"
+            return _respond_gather(CallSid, emergency_reply("voice"), stats)
+
         route = route_message(user_text)
 
         if current_stage == "completed":
@@ -533,6 +554,24 @@ async def agent_entry(
             stats["intent_ms"] += (time.perf_counter() - parse_start) * 1000
 
             if selected:
+                ctx = CTX.get(CallSid) or {}
+                service = ctx.get("service") or "sesion de fisioterapia"
+                selected_dt = parse_slot_label(selected)
+                if selected_dt:
+                    booking_result = await confirm_slot(
+                        channel="voice",
+                        external_user_id=CallSid,
+                        service_type=service,
+                        start_at=selected_dt,
+                        metadata={"slot_label": selected},
+                    )
+                    if not booking_result.ok:
+                        stats["branch"] = f"slot_confirm_failed_{booking_result.reason}"
+                        return _respond_gather(
+                            CallSid,
+                            "Ese hueco acaba de ocuparse. Te digo otras opciones.",
+                            stats,
+                        )
                 CTX.clear_flow(CallSid)
                 CTX.set_last_confirmed_slot(CallSid, selected)
                 stats["branch"] = "slot_selected"
@@ -682,6 +721,7 @@ async def conversationrelay_ws(websocket: WebSocket):
     try:
         while True:
             raw_message = await websocket.receive_text()
+            ws_received_at = time.perf_counter()
             logger.info(f"conversationrelay_ws_recv raw={raw_message}")
 
             try:
@@ -693,18 +733,44 @@ async def conversationrelay_ws(websocket: WebSocket):
                 )
 
                 if message_type == "setup":
+                    route_started_at = time.perf_counter()
                     greeting = handle_setup_message(session, payload)
+                    route_finished_at = time.perf_counter()
                     await _send_conversationrelay_text(websocket, greeting)
+                    response_sent_at = time.perf_counter()
+                    logger.info(
+                        "conversationrelay_latency "
+                        f"ws_received_at={ws_received_at:.6f} route_started_at={route_started_at:.6f} "
+                        f"route_finished_at={route_finished_at:.6f} response_sent_at={response_sent_at:.6f} "
+                        f"total_turn_latency_ms={(response_sent_at - ws_received_at) * 1000:.1f}"
+                    )
                     continue
 
                 if message_type == "prompt":
+                    route_started_at = time.perf_counter()
                     reply = await handle_prompt_message(session, payload)
+                    route_finished_at = time.perf_counter()
                     if reply:
                         await _send_conversationrelay_text(websocket, reply)
+                        response_sent_at = time.perf_counter()
+                        logger.info(
+                            "conversationrelay_latency "
+                            f"ws_received_at={ws_received_at:.6f} route_started_at={route_started_at:.6f} "
+                            f"route_finished_at={route_finished_at:.6f} response_sent_at={response_sent_at:.6f} "
+                            f"total_turn_latency_ms={(response_sent_at - ws_received_at) * 1000:.1f}"
+                        )
                     continue
 
                 if message_type == "dtmf":
+                    route_started_at = time.perf_counter()
                     await _send_conversationrelay_text(websocket, await handle_dtmf_message(session, payload))
+                    route_finished_at = response_sent_at = time.perf_counter()
+                    logger.info(
+                        "conversationrelay_latency "
+                        f"ws_received_at={ws_received_at:.6f} route_started_at={route_started_at:.6f} "
+                        f"route_finished_at={route_finished_at:.6f} response_sent_at={response_sent_at:.6f} "
+                        f"total_turn_latency_ms={(response_sent_at - ws_received_at) * 1000:.1f}"
+                    )
                     continue
 
                 if message_type == "interrupt":

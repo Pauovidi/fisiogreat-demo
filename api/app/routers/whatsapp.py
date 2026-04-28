@@ -6,11 +6,14 @@ from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy.orm import Session
 
 from ..db.db import get_db
+from ..services import supabase_repo
+from ..services.booking_service import cancel_appointment, confirm_slot, parse_slot_label, reschedule_appointment
 from ..services.pelu_nlu import analyze_message
 from ..services.slots import BusinessRules, propose_slots
 from ..utils.date_parser import parse_spanish_day, parse_time_pref
 from ..utils.faq import get_faq_answer
 from ..utils.intent_router import detect_service, route_message
+from ..utils.emergency_guard import detect_emergency, emergency_reply
 from ..utils.logger import logger
 from ..utils.mini_context import CTX
 from ..utils.slot_picker import pick_slot
@@ -29,6 +32,18 @@ WEEKDAY_LABELS = [
     "sábado",
     "domingo",
 ]
+
+
+def _latest_appointment_id(external_user_id: str) -> Optional[str]:
+    appointments = [
+        item
+        for item in supabase_repo.STORE.appointments.values()
+        if item.get("external_user_id") == external_user_id and item.get("status") != "cancelled"
+    ]
+    if not appointments:
+        return None
+    appointments.sort(key=lambda item: item.get("created_at", ""), reverse=True)
+    return appointments[0]["id"]
 
 
 def _twiml(msg: str) -> Response:
@@ -128,6 +143,21 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
         logger.info(f"WA from {wa_from}: {body}")
 
         current_stage = CTX.get_stage(wa_from)
+        emergency = detect_emergency(body)
+        if emergency.detected:
+            CTX.clear_flow(wa_from)
+            CTX.set_stage(wa_from, "emergency_detected")
+            try:
+                await supabase_repo.update_conversation_session(
+                    wa_from,
+                    channel="whatsapp",
+                    external_user_id=wa_from,
+                    emergency_detected=True,
+                    emergency_match=emergency.matched,
+                )
+            except Exception as exc:
+                logger.warning(f"WA emergency session mark failed for {wa_from}: {exc}")
+            return _twiml(emergency_reply("whatsapp"))
 
         if current_stage == "awaiting_service":
             service = detect_service(body)
@@ -164,6 +194,19 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
             current = _current_slots(wa_from)
             selected = pick_slot(body, current)
             if selected:
+                ctx = CTX.get(wa_from) or {}
+                service = ctx.get("service") or "sesion de fisioterapia"
+                selected_dt = parse_slot_label(selected)
+                if selected_dt:
+                    booking_result = await confirm_slot(
+                        channel="whatsapp",
+                        external_user_id=wa_from,
+                        service_type=service,
+                        start_at=selected_dt,
+                        metadata={"slot_label": selected},
+                    )
+                    if not booking_result.ok:
+                        return _twiml("Ese hueco acaba de ocuparse. Dime otro día y lo reviso.")
                 CTX.clear_flow(wa_from)
                 return _twiml(copy.confirm_booking(selected))
 
@@ -176,6 +219,28 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
 
             if route_peek["type"] not in {"faq", "out_of_scope", "cancel", "reschedule", "greeting", "booking"}:
                 return _twiml(copy.propose_slots(current))
+
+        elif current_stage == "awaiting_cancel_date":
+            appointment_id = _latest_appointment_id(wa_from)
+            CTX.clear_flow(wa_from)
+            if appointment_id:
+                await cancel_appointment(appointment_id)
+                return _twiml("Listo, he dejado la cita cancelada.")
+            return _twiml("No encuentro una cita activa para cancelar desde este chat. Te paso con el equipo.")
+
+        elif current_stage == "awaiting_reschedule_date":
+            parsed_date = parse_spanish_day(body)
+            appointment_id = _latest_appointment_id(wa_from)
+            if parsed_date and appointment_id:
+                new_start = dt.datetime.combine(parsed_date, dt.time(10, 0))
+                await reschedule_appointment(
+                    appointment_id,
+                    new_start_at=new_start,
+                    new_end_at=new_start + dt.timedelta(minutes=45),
+                )
+                CTX.clear_flow(wa_from)
+                return _twiml("Listo, he cambiado la cita. Te queda confirmada para el nuevo día a las 10:00.")
+            return _twiml("Dime el nuevo día, por ejemplo mañana o jueves.")
 
         route = route_message(body)
         route_type = route["type"]
@@ -205,10 +270,12 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
             return _twiml(copy.main_menu_soft())
 
         if route_type == "cancel":
+            CTX.set_stage(wa_from, "awaiting_cancel_date")
             return _twiml("Para cancelar una cita, dime la fecha y la hora aproximada y te ayudo.")
 
         if route_type == "reschedule":
-            return _twiml("Para cambiar la cita, dime la cita actual y el nuevo día que te vendría mejor.")
+            CTX.set_stage(wa_from, "awaiting_reschedule_date")
+            return _twiml("Para cambiar la cita, dime el nuevo día que te vendría mejor.")
 
         if route_type == "out_of_scope":
             return _twiml(copy.out_of_scope())

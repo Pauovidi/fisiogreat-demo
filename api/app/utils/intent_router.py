@@ -13,6 +13,15 @@ def normalize_text(text: str) -> str:
 def detect_service(text: str) -> Optional[str]:
     normalized = normalize_text(text)
 
+    if any(phrase in normalized for phrase in ["primera visita", "primera cita"]):
+        return "primera visita de fisioterapia"
+    if any(phrase in normalized for phrase in ["valoracion inicial", "evaluacion inicial"]):
+        return "valoracion inicial"
+    if any(phrase in normalized for phrase in ["seguimiento", "consulta de seguimiento", "revision"]):
+        return "consulta de seguimiento"
+    if any(phrase in normalized for phrase in ["fisioterapia", "fisio", "sesion", "sesion de fisio", "masaje"]):
+        return "sesion de fisioterapia"
+
     if "corte" in normalized and any(token in normalized for token in ["lavado", "lavar", "labado", "labar"]):
         return "corte + lavado"
     if ("raiz" in normalized or "raices" in normalized) and ("color" in normalized or "tinte" in normalized):
@@ -159,6 +168,9 @@ def _matches_services(normalized: str) -> bool:
             "haceis color",
             "haceis mechas",
             "poneis mechas",
+            "tratamientos haceis",
+            "haceis fisioterapia",
+            "servicios de fisio",
         ]
     )
 

@@ -41,23 +41,23 @@ NUMBER_WORDS = {
 class VoiceCopy:
     @staticmethod
     def opening_greeting() -> str:
-        return "Hola, soy el asistente de la peluqueria Romualdo. En que puedo ayudarte?"
+        return "Hola, soy el asistente de FisioGreat. En que puedo ayudarte?"
 
     @staticmethod
     def ask_service() -> str:
-        return "Que te apetece hacerte?"
+        return "Que cita necesitas?"
 
     @staticmethod
     def ask_service_for_booking() -> str:
-        return "Vale, claro. Que te quieres hacer?"
+        return "Vale, claro. Que tipo de cita necesitas?"
 
     @staticmethod
     def ask_service_retry() -> str:
-        return "No te segui. Quieres corte, color, mechas o peinado?"
+        return "No te segui. Quieres primera visita, sesion de fisioterapia o seguimiento?"
 
     @staticmethod
     def clarify_lavado() -> str:
-        return "Quieres corte y lavado?"
+        return "Quieres una sesion de fisioterapia?"
 
     @staticmethod
     def ask_date(service: Optional[str] = None) -> str:
@@ -132,7 +132,7 @@ class VoiceCopy:
 
     @staticmethod
     def thanks_closing() -> str:
-        return "Gracias a ti por confiar en la peluqueria Romualdo. Te esperamos."
+        return "Gracias a ti por confiar en FisioGreat. Te esperamos."
 
     @staticmethod
     def thanks_with_followup(follow_up: str) -> str:

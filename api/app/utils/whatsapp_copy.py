@@ -6,24 +6,24 @@ class WhatsAppCopy:
     @staticmethod
     def greet_and_offer() -> str:
         variants = [
-            "Hola, encantada. ¿Qué servicio te gustaría reservar?",
-            "Hola, bienvenida. ¿Qué te apetece hacerte hoy?",
-            "Buenas, te ayudo con la cita. ¿Qué servicio quieres?",
+            "Hola, soy el asistente de FisioGreat. ¿Qué cita necesitas?",
+            "Hola, te ayudo con FisioGreat. ¿Quieres reservar una cita de fisioterapia?",
+            "Buenas, te ayudo con la cita. ¿Qué tipo de sesión necesitas?",
         ]
         return random.choice(variants)
 
     @staticmethod
     def ask_service() -> str:
         variants = [
-            "Cuéntame, ¿qué servicio quieres? Puedo mirar corte, color, mechas o peinado.",
-            "¿Qué servicio necesitas? Por ejemplo corte, color o peinado.",
-            "Perfecto. ¿Qué te gustaría hacerte?",
+            "Cuéntame, ¿qué cita necesitas? Puedo mirar primera visita, sesión de fisioterapia o seguimiento.",
+            "¿Qué tipo de cita necesitas? Por ejemplo valoración inicial o sesión de fisioterapia.",
+            "Perfecto. ¿Qué necesitas reservar?",
         ]
         return random.choice(variants)
 
     @staticmethod
     def ask_service_retry() -> str:
-        return "No te seguí del todo. ¿Qué servicio quieres reservar?"
+        return "No te seguí del todo. ¿Qué tipo de cita quieres reservar?"
 
     @staticmethod
     def ask_date(service: Optional[str] = None) -> str:
@@ -46,19 +46,19 @@ class WhatsAppCopy:
 
     @staticmethod
     def confirm_booking(slot: str) -> str:
-        return f"Perfecto, te dejo apuntada {slot}. Si quieres, seguimos con la reserva."
+        return f"Perfecto, te dejo apuntada la cita para {slot}."
 
     @staticmethod
     def main_menu_soft() -> str:
-        return "Puedo ayudarte con una cita. Si quieres, dime qué servicio necesitas y lo vemos."
+        return "Puedo ayudarte con una cita de fisioterapia. Si quieres, dime qué necesitas y lo vemos."
 
     @staticmethod
     def out_of_scope() -> str:
-        return "Ahora mismo te ayudo con citas y horario. Si quieres reservar, dime qué servicio buscas."
+        return "Ahora mismo te ayudo con citas, horarios y dudas básicas de FisioGreat."
 
     @staticmethod
     def technical_error() -> str:
-        return "He tenido un fallo puntual. Si quieres, seguimos paso a paso: primero dime qué servicio necesitas."
+        return "He tenido un fallo puntual. Si quieres, seguimos paso a paso: primero dime qué cita necesitas."
 
 
 WA_COPY = WhatsAppCopy()
