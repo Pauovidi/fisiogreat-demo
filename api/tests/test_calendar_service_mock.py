@@ -19,7 +19,8 @@ class _FakeFreebusy:
 
     def query(self, *, body):
         self.calls["freebusy_body"] = body
-        return _FakeRequest({"calendars": {"calendar-real": {"busy": []}}})
+        busy = self.calls.get("freebusy_result", [])
+        return _FakeRequest({"calendars": {"calendar-real": {"busy": busy}}})
 
 
 class _FakeEvents:
@@ -87,6 +88,18 @@ def test_real_free_busy_sends_rfc3339_offsets(monkeypatch):
         "timeZone": "Europe/Madrid",
         "items": [{"id": "calendar-real"}],
     }
+
+
+def test_real_free_busy_ignores_date_only_busy_periods(monkeypatch):
+    calls = {"freebusy_result": [{"start": "2026-05-04", "end": "2026-05-05"}]}
+    monkeypatch.setattr(settings, "USE_REAL_CALENDAR", True)
+    monkeypatch.setattr(settings, "GOOGLE_CALENDAR_ID", "calendar-real")
+    monkeypatch.setattr(settings, "GOOGLE_CALENDAR_TIMEZONE", "Europe/Madrid")
+    monkeypatch.setattr(calendar_service, "_get_service", lambda: _FakeCalendarService(calls))
+
+    result = free_busy(dt.datetime(2026, 5, 4, 10, 0), dt.datetime(2026, 5, 4, 10, 45))
+
+    assert result == []
 
 
 def test_real_create_event_sends_rfc3339_offsets(monkeypatch):

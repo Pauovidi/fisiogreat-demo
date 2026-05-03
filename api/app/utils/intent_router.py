@@ -159,10 +159,13 @@ def _matches_services(normalized: str) -> bool:
         for phrase in [
             "que servicios",
             "que servicios teneis",
+            "servicios",
             "que haceis",
+            "que tratais",
             "servicios haceis",
             "que me puedo hacer",
             "que tratamientos",
+            "tratamientos",
             "teneis color",
             "trabajais color",
             "haceis color",

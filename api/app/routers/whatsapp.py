@@ -8,12 +8,17 @@ from sqlalchemy.orm import Session
 from ..db.db import get_db
 from ..services import supabase_repo
 from ..config.settings import settings
-from ..services.booking_service import cancel_appointment, confirm_slot, parse_slot_label, reschedule_appointment
+from ..services.booking_service import (
+    cancel_appointment,
+    confirm_slot,
+    parse_slot_label,
+    propose_slots as booking_propose_slots,
+    reschedule_appointment,
+)
 from ..services.pelu_nlu import analyze_message
-from ..services.slots import BusinessRules, propose_slots
 from ..utils.date_parser import parse_spanish_day, parse_time_pref
 from ..utils.faq import get_faq_answer
-from ..utils.intent_router import detect_service, route_message
+from ..utils.intent_router import detect_service, normalize_text, route_message
 from ..utils.emergency_guard import detect_emergency, emergency_reply
 from ..utils.logger import logger
 from ..utils.mini_context import CTX
@@ -77,9 +82,11 @@ def _build_slot_labels(service: str, date_pref: dt.date, time_pref: Optional[str
     preferred_dt = dt.datetime.combine(date_pref, dt.time(preferred_hour, 0))
 
     try:
-        raw_slots = propose_slots(preferred_dt, service, BusinessRules())
+        raw_slots = booking_propose_slots(preferred_dt, service)
     except Exception as exc:
         logger.warning(f"WA slot generation fallback for {service}: {exc}")
+        if settings.USE_REAL_CALENDAR:
+            return []
         raw_slots = []
 
     labels: List[str] = []
@@ -98,6 +105,8 @@ def _build_slot_labels(service: str, date_pref: dt.date, time_pref: Optional[str
             break
 
     if not labels:
+        if settings.USE_REAL_CALENDAR:
+            return []
         return _dummy_slot_labels(date_pref, time_pref, count)
     return labels
 
@@ -119,7 +128,9 @@ def _faq_with_reengagement(key: str, faq_id: str = "hours") -> str:
     ctx = CTX.get(key) or {}
 
     if stage == "awaiting_service":
-        return f"{answer}\n\n{copy.ask_service()}"
+        if faq_id == "services":
+            return f"{answer}\n\nSi quieres reservar, dime qué servicio necesitas."
+        return answer
     if stage == "awaiting_date":
         return f"{answer}\n\n{copy.ask_date(ctx.get('service'))}"
     if stage == "offering_slots":
@@ -132,6 +143,45 @@ def _faq_with_reengagement(key: str, faq_id: str = "hours") -> str:
 
 def _is_state_interrupt(route_type: str) -> bool:
     return route_type in {"faq", "cancel", "reschedule", "out_of_scope", "greeting", "booking", "more_options"}
+
+
+RESET_COMMANDS = {
+    "reiniciar",
+    "reiniciar conversacion",
+    "reset",
+    "resetear",
+    "empezar de nuevo",
+    "volver a empezar",
+    "borrar conversacion",
+    "limpiar conversacion",
+    "cancelar flujo",
+    "salir",
+    "olvida lo anterior",
+}
+
+PENDING_FLOW_STAGES = {"awaiting_service", "awaiting_date", "offering_slots", "awaiting_reschedule_date"}
+
+
+def _is_reset_command(body: str) -> bool:
+    return normalize_text(body) in RESET_COMMANDS
+
+
+def _is_pending_flow_cancel(body: str, stage: str) -> bool:
+    return normalize_text(body) in {"cancelar", "anular", "salir"} and stage in PENDING_FLOW_STAGES
+
+
+async def _clear_conversation_flow(key: str, *, reason: str) -> None:
+    CTX.clear_flow(key)
+    try:
+        await supabase_repo.update_conversation_session(
+            key,
+            channel="whatsapp",
+            external_user_id=key,
+            stage="idle",
+            reset_reason=reason,
+        )
+    except Exception as exc:
+        logger.warning("WA reset session update failed for %s: %r", key, exc)
 
 
 @router.post("/whatsapp")
@@ -159,6 +209,14 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
             except Exception as exc:
                 logger.warning(f"WA emergency session mark failed for {wa_from}: {exc}")
             return _twiml(emergency_reply("whatsapp"))
+
+        if _is_reset_command(body):
+            await _clear_conversation_flow(wa_from, reason="reset_command")
+            return _twiml(copy.reset_done())
+
+        if _is_pending_flow_cancel(body, current_stage):
+            await _clear_conversation_flow(wa_from, reason="pending_flow_cancel")
+            return _twiml(copy.cancel_pending_flow())
 
         if current_stage == "awaiting_service":
             service = detect_service(body)
@@ -263,7 +321,6 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
 
         if route_type == "greeting":
             CTX.clear_flow(wa_from)
-            CTX.set_stage(wa_from, "awaiting_service")
             return _twiml(copy.greet_and_offer())
 
         if route_type == "booking":

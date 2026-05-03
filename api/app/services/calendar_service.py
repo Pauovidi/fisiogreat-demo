@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 import google.auth
 from google.oauth2 import service_account
+from googleapiclient.errors import HttpError
 from googleapiclient.discovery import build
 
 from ..config.settings import settings
@@ -83,6 +84,46 @@ def _mask_calendar_id(calendar_id: Optional[str]) -> str:
     return f"{calendar_id[:6]}...{calendar_id[-6:]}"
 
 
+def _http_error_details(exc: Exception) -> tuple[Optional[int], str]:
+    if not isinstance(exc, HttpError):
+        return None, repr(exc)
+    status = getattr(exc.resp, "status", None)
+    content = exc.content.decode("utf-8", errors="replace") if isinstance(exc.content, bytes) else str(exc.content)
+    return status, content[:1000]
+
+
+def _safe_freebusy_body(body: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "timeMin": body.get("timeMin"),
+        "timeMax": body.get("timeMax"),
+        "timeZone": body.get("timeZone"),
+        "items": [{"id": _mask_calendar_id(item.get("id"))} for item in body.get("items", [])],
+    }
+
+
+def _safe_event_body(body: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "id": body.get("id"),
+        "summary": body.get("summary"),
+        "start": body.get("start"),
+        "end": body.get("end"),
+        "extendedProperties": {"private_keys": sorted(body.get("extendedProperties", {}).get("private", {}).keys())},
+        "reminders": body.get("reminders"),
+    }
+
+
+def _is_date_only(value: str) -> bool:
+    return bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", value or ""))
+
+
+def _filter_google_busy_periods(busy: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    return [
+        period
+        for period in busy
+        if not (_is_date_only(period.get("start", "")) or _is_date_only(period.get("end", "")))
+    ]
+
+
 def _overlaps(start_a: dt.datetime, end_a: dt.datetime, start_b: dt.datetime, end_b: dt.datetime) -> bool:
     return start_a < end_b and start_b < end_a
 
@@ -114,14 +155,27 @@ def free_busy(start_at: dt.datetime, end_at: dt.datetime) -> List[Dict[str, str]
         "items": [{"id": settings.GOOGLE_CALENDAR_ID}],
     }
     logger.info(
-        "calendar_freebusy_request freebusy_time_min=%s freebusy_time_max=%s timezone=%s calendar_id=%s",
+        "calendar_freebusy_request freebusy_time_min=%s freebusy_time_max=%s timezone=%s calendar_id=%s freebusy_request_body=%s",
         start_rfc3339,
         end_rfc3339,
         timezone,
         _mask_calendar_id(settings.GOOGLE_CALENDAR_ID),
+        _safe_freebusy_body(body),
     )
-    result = svc.freebusy().query(body=body).execute()
-    return result.get("calendars", {}).get(settings.GOOGLE_CALENDAR_ID, {}).get("busy", [])
+    try:
+        result = svc.freebusy().query(body=body).execute()
+    except Exception as exc:
+        status, content = _http_error_details(exc)
+        logger.warning(
+            "calendar_freebusy_error freebusy_error_status=%s freebusy_error_content=%r timezone=%s calendar_id=%s",
+            status,
+            content,
+            timezone,
+            _mask_calendar_id(settings.GOOGLE_CALENDAR_ID),
+        )
+        raise
+    busy = result.get("calendars", {}).get(settings.GOOGLE_CALENDAR_ID, {}).get("busy", [])
+    return _filter_google_busy_periods(busy)
 
 
 def build_deterministic_event_id(
@@ -178,20 +232,24 @@ def create_event(
     }
     try:
         logger.info(
-            "calendar_create_attempt use_real_calendar=%s mode=real event_id=%s calendar_id=%s create_event_start=%s create_event_end=%s timezone=%s",
+            "calendar_create_attempt use_real_calendar=%s mode=real event_id=%s calendar_id=%s create_event_start=%s create_event_end=%s timezone=%s create_event_request_body=%s",
             settings.USE_REAL_CALENDAR,
             event_id,
             _mask_calendar_id(settings.GOOGLE_CALENDAR_ID),
             start_rfc3339,
             end_rfc3339,
             timezone,
+            _safe_event_body(body),
         )
         result = svc.events().insert(calendarId=settings.GOOGLE_CALENDAR_ID, body=body).execute()
     except Exception as exc:
+        status, content = _http_error_details(exc)
         logger.warning(
-            "calendar_create_error use_real_calendar=%s event_id=%s error=%r",
+            "calendar_create_error use_real_calendar=%s event_id=%s create_event_error_status=%s create_event_error_content=%r error=%r",
             settings.USE_REAL_CALENDAR,
             event_id,
+            status,
+            content,
             exc,
         )
         raise

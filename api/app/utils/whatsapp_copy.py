@@ -5,12 +5,10 @@ from typing import List, Optional
 class WhatsAppCopy:
     @staticmethod
     def greet_and_offer() -> str:
-        variants = [
-            "Hola, soy el asistente de FisioGreat. ¿Qué cita necesitas?",
-            "Hola, te ayudo con FisioGreat. ¿Quieres reservar una cita de fisioterapia?",
-            "Buenas, te ayudo con FisioGreat. ¿Qué tipo de sesión de fisioterapia necesitas?",
-        ]
-        return random.choice(variants)
+        return (
+            "Buenas, soy el asistente de FisioGreat. Puedo ayudarte a pedir, cambiar o cancelar una cita, "
+            "o resolver dudas sobre servicios y horarios. ¿Qué necesitas?"
+        )
 
     @staticmethod
     def ask_service() -> str:
@@ -50,7 +48,21 @@ class WhatsAppCopy:
 
     @staticmethod
     def main_menu_soft() -> str:
-        return "Puedo ayudarte con una cita de fisioterapia. Si quieres, dime qué necesitas y lo vemos."
+        return (
+            "Puedo ayudarte a pedir, cambiar o cancelar una cita, o resolver dudas sobre servicios y horarios. "
+            "¿Qué necesitas?"
+        )
+
+    @staticmethod
+    def reset_done() -> str:
+        return (
+            "Perfecto, empezamos de nuevo. Puedo ayudarte a pedir, cambiar o cancelar una cita, "
+            "o resolver dudas sobre servicios y horarios. ¿Qué necesitas?"
+        )
+
+    @staticmethod
+    def cancel_pending_flow() -> str:
+        return "De acuerdo, cancelo esta gestión y empezamos de nuevo. ¿En qué puedo ayudarte?"
 
     @staticmethod
     def out_of_scope() -> str:
