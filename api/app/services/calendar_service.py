@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+import google.auth
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
@@ -37,19 +38,20 @@ CALENDAR_STORE = InMemoryCalendarStore()
 
 
 def calendar_configured() -> bool:
-    return bool(
-        settings.USE_REAL_CALENDAR
-        and settings.GOOGLE_CREDENTIALS_JSON_BASE64
-        and settings.GOOGLE_CALENDAR_ID
-    )
+    return bool(settings.USE_REAL_CALENDAR and settings.GOOGLE_CALENDAR_ID)
 
 
 def _get_service():
-    if not calendar_configured():
+    if not settings.USE_REAL_CALENDAR:
         return None
-    data = base64.b64decode(settings.GOOGLE_CREDENTIALS_JSON_BASE64).decode("utf-8")
-    info = json.loads(data)
-    creds = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
+    if not settings.GOOGLE_CALENDAR_ID:
+        raise RuntimeError("GOOGLE_CALENDAR_ID is required when USE_REAL_CALENDAR=true")
+    if settings.GOOGLE_CREDENTIALS_JSON_BASE64:
+        data = base64.b64decode(settings.GOOGLE_CREDENTIALS_JSON_BASE64).decode("utf-8")
+        info = json.loads(data)
+        creds = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
+    else:
+        creds, _ = google.auth.default(scopes=SCOPES)
     return build("calendar", "v3", credentials=creds, cache_discovery=False)
 
 
@@ -108,7 +110,17 @@ def create_event(
 ) -> str:
     svc = _get_service()
     if not svc:
+        logger.info(
+            "calendar_create_attempt use_real_calendar=%s mode=mock event_id=%s",
+            settings.USE_REAL_CALENDAR,
+            event_id,
+        )
         CALENDAR_STORE.events[event_id] = CalendarEvent(event_id, start_at, end_at, summary)
+        logger.info(
+            "calendar_create_success use_real_calendar=%s mode=mock calendar_event_id=%s",
+            settings.USE_REAL_CALENDAR,
+            event_id,
+        )
         return event_id
 
     body = {
@@ -121,11 +133,28 @@ def create_event(
         "reminders": {"useDefault": True},
     }
     try:
+        logger.info(
+            "calendar_create_attempt use_real_calendar=%s mode=real event_id=%s calendar_id=%s",
+            settings.USE_REAL_CALENDAR,
+            event_id,
+            settings.GOOGLE_CALENDAR_ID,
+        )
         result = svc.events().insert(calendarId=settings.GOOGLE_CALENDAR_ID, body=body).execute()
     except Exception as exc:
-        logger.warning(f"calendar_create_event_failed event_id={event_id!r} error={exc!r}")
+        logger.warning(
+            "calendar_create_error use_real_calendar=%s event_id=%s error=%r",
+            settings.USE_REAL_CALENDAR,
+            event_id,
+            exc,
+        )
         raise
-    return result.get("id", event_id)
+    calendar_event_id = result.get("id", event_id)
+    logger.info(
+        "calendar_create_success use_real_calendar=%s calendar_event_id=%s",
+        settings.USE_REAL_CALENDAR,
+        calendar_event_id,
+    )
+    return calendar_event_id
 
 
 def update_event(event_id: str, *, start_at: dt.datetime, end_at: dt.datetime, summary: Optional[str] = None) -> bool:

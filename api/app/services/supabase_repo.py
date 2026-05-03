@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional
 import httpx
 
 from ..config.settings import settings
+from ..utils.logger import logger
 
 
 @dataclass
@@ -172,6 +173,12 @@ async def release_booking_lock(*, clinic_id: str, resource_id: str, start_at: dt
     lock = STORE.locks.get(key)
     if lock:
         lock["status"] = "released"
+        lock["released_at"] = _now()
+        if supabase_configured():
+            try:
+                await _patch("booking_locks", lock["id"], {"status": "released", "released_at": lock["released_at"]})
+            except Exception as exc:
+                logger.warning("booking_lock_release_failed lock_id=%s error=%r", lock.get("id"), exc)
 
 
 async def create_reminder_job(**payload: Any) -> Dict[str, Any]:

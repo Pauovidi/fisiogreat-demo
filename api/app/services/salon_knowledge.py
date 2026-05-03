@@ -114,7 +114,10 @@ def _pricing_answer(channel: str) -> str:
 def _services_answer(channel: str) -> str:
     if channel == "voice":
         return "Atendemos primera visita, sesion de fisioterapia, valoracion inicial y seguimiento."
-    return f"Hacemos {salon_services()}."
+    return (
+        "En esta demo puedo gestionar valoración inicial, sesión de fisioterapia y consulta de seguimiento. "
+        "También puedo ayudarte a pedir, cambiar o cancelar una cita."
+    )
 
 
 def _human_answer(channel: str) -> str:

@@ -74,6 +74,13 @@ async def confirm_slot(
     clinic_id = settings.DEMO_CLINIC_ID
     resource_id = settings.GOOGLE_CALENDAR_ID or "demo-calendar"
     end_at = end_at or start_at + dt.timedelta(minutes=service_duration_minutes(service_type))
+    logger.info(
+        "booking_confirm_start use_real_calendar=%s channel=%s proposed_slot_start=%s proposed_slot_end=%s",
+        settings.USE_REAL_CALENDAR,
+        channel,
+        start_at.isoformat(),
+        end_at.isoformat(),
+    )
 
     lock_ok = await supabase_repo.acquire_booking_lock(
         clinic_id=clinic_id,
@@ -105,6 +112,12 @@ async def confirm_slot(
             service_type,
             start_at,
         )
+        logger.info(
+            "calendar_create_attempt use_real_calendar=%s proposed_slot_start=%s proposed_slot_end=%s",
+            settings.USE_REAL_CALENDAR,
+            start_at.isoformat(),
+            end_at.isoformat(),
+        )
         calendar_event_id = calendar_service.create_event(
             event_id=event_id,
             summary=f"{settings.CLINIC_NAME} - {service_type}",
@@ -112,6 +125,11 @@ async def confirm_slot(
             end_at=end_at,
             description=f"Cita creada por {channel} para {external_user_id}",
             metadata={"channel": channel, "clinic_id": clinic_id},
+        )
+        logger.info(
+            "calendar_create_success use_real_calendar=%s calendar_event_id=%s",
+            settings.USE_REAL_CALENDAR,
+            calendar_event_id,
         )
         appointment = await supabase_repo.create_appointment(
             id=str(uuid.uuid4()),
@@ -126,9 +144,22 @@ async def confirm_slot(
             external_user_id=external_user_id,
             metadata=metadata or {},
         )
+        logger.info(
+            "booking_confirm_success use_real_calendar=%s calendar_event_id=%s appointment_id=%s",
+            settings.USE_REAL_CALENDAR,
+            calendar_event_id,
+            appointment.get("id"),
+        )
         return BookingResult(True, appointment=appointment)
     except Exception as exc:
-        logger.warning(f"booking_confirm_failed external_user_id={external_user_id!r} error={exc!r}")
+        logger.warning(
+            "calendar_create_error use_real_calendar=%s proposed_slot_start=%s proposed_slot_end=%s error=%r",
+            settings.USE_REAL_CALENDAR,
+            start_at.isoformat(),
+            end_at.isoformat(),
+            exc,
+        )
+        logger.warning("booking_confirm_failed external_user_id=%r error=%r", external_user_id, exc)
         await supabase_repo.release_booking_lock(
             clinic_id=clinic_id,
             resource_id=resource_id,

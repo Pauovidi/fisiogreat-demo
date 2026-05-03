@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from ..db.db import get_db
 from ..services import supabase_repo
+from ..config.settings import settings
 from ..services.booking_service import cancel_appointment, confirm_slot, parse_slot_label, reschedule_appointment
 from ..services.pelu_nlu import analyze_message
 from ..services.slots import BusinessRules, propose_slots
@@ -112,8 +113,8 @@ def _current_slots(key: str, page_size: int = WA_PAGE_SIZE) -> List[str]:
     return current or offered_slots[:page_size]
 
 
-def _faq_with_reengagement(key: str) -> str:
-    answer = get_faq_answer("hours", channel="whatsapp") or copy.main_menu_soft()
+def _faq_with_reengagement(key: str, faq_id: str = "hours") -> str:
+    answer = get_faq_answer(faq_id, channel="whatsapp") or copy.main_menu_soft()
     stage = CTX.get_stage(key)
     ctx = CTX.get(key) or {}
 
@@ -197,16 +198,31 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
                 ctx = CTX.get(wa_from) or {}
                 service = ctx.get("service") or "sesion de fisioterapia"
                 selected_dt = parse_slot_label(selected)
-                if selected_dt:
-                    booking_result = await confirm_slot(
-                        channel="whatsapp",
-                        external_user_id=wa_from,
-                        service_type=service,
-                        start_at=selected_dt,
-                        metadata={"slot_label": selected},
+                logger.info(
+                    "wa_slot_selected selected_option=%s proposed_slot_label=%s use_real_calendar=%s",
+                    body,
+                    selected,
+                    settings.USE_REAL_CALENDAR,
+                )
+                if not selected_dt:
+                    logger.warning("wa_slot_selected_parse_failed selected_option=%s slot_label=%s", body, selected)
+                    return _twiml("No he podido leer bien ese hueco. Dime el número otra vez y lo reviso.")
+                booking_result = await confirm_slot(
+                    channel="whatsapp",
+                    external_user_id=wa_from,
+                    service_type=service,
+                    start_at=selected_dt,
+                    metadata={"slot_label": selected},
+                )
+                if not booking_result.ok:
+                    logger.warning(
+                        "wa_booking_not_confirmed selected_option=%s proposed_slot_start=%s reason=%s use_real_calendar=%s",
+                        body,
+                        selected_dt.isoformat(),
+                        booking_result.reason,
+                        settings.USE_REAL_CALENDAR,
                     )
-                    if not booking_result.ok:
-                        return _twiml("Ese hueco acaba de ocuparse. Dime otro día y lo reviso.")
+                    return _twiml("No he podido confirmar ese hueco ahora mismo. Dime otro día y lo reviso.")
                 CTX.clear_flow(wa_from)
                 return _twiml(copy.confirm_booking(selected))
 
@@ -261,7 +277,7 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
             return _twiml(copy.ask_service())
 
         if route_type == "faq":
-            return _twiml(_faq_with_reengagement(wa_from))
+            return _twiml(_faq_with_reengagement(wa_from, route.get("faq_id", "hours")))
 
         if route_type == "more_options":
             next_batch = CTX.next_slots(wa_from, WA_PAGE_SIZE)

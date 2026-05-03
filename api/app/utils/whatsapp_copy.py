@@ -8,7 +8,7 @@ class WhatsAppCopy:
         variants = [
             "Hola, soy el asistente de FisioGreat. ¿Qué cita necesitas?",
             "Hola, te ayudo con FisioGreat. ¿Quieres reservar una cita de fisioterapia?",
-            "Buenas, te ayudo con la cita. ¿Qué tipo de sesión necesitas?",
+            "Buenas, te ayudo con FisioGreat. ¿Qué tipo de sesión de fisioterapia necesitas?",
         ]
         return random.choice(variants)
 
