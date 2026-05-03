@@ -4,7 +4,8 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
+from zoneinfo import ZoneInfo
 
 import google.auth
 from google.oauth2 import service_account
@@ -15,6 +16,7 @@ from ..utils.logger import logger
 
 
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
+DateLike = Union[dt.datetime, str]
 
 
 @dataclass(frozen=True)
@@ -55,14 +57,30 @@ def _get_service():
     return build("calendar", "v3", credentials=creds, cache_discovery=False)
 
 
-def _rfc3339(value: dt.datetime) -> str:
-    if value.tzinfo is None:
-        return value.isoformat()
-    return value.isoformat()
+def ensure_aware(value: DateLike, timezone: str = "Europe/Madrid") -> dt.datetime:
+    parsed = _as_dt(value) if isinstance(value, str) else value
+    zone = ZoneInfo(timezone)
+    if parsed.tzinfo is None or parsed.tzinfo.utcoffset(parsed) is None:
+        return parsed.replace(tzinfo=zone)
+    return parsed.astimezone(zone)
 
 
-def _as_dt(value: str) -> dt.datetime:
+def to_google_rfc3339(value: DateLike, timezone: str = "Europe/Madrid") -> str:
+    return ensure_aware(value, timezone).isoformat()
+
+
+def _as_dt(value: DateLike) -> dt.datetime:
+    if isinstance(value, dt.datetime):
+        return value
     return dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _mask_calendar_id(calendar_id: Optional[str]) -> str:
+    if not calendar_id:
+        return "unset"
+    if len(calendar_id) <= 12:
+        return f"{calendar_id[:3]}..."
+    return f"{calendar_id[:6]}...{calendar_id[-6:]}"
 
 
 def _overlaps(start_a: dt.datetime, end_a: dt.datetime, start_b: dt.datetime, end_b: dt.datetime) -> bool:
@@ -71,19 +89,37 @@ def _overlaps(start_a: dt.datetime, end_a: dt.datetime, start_b: dt.datetime, en
 
 def free_busy(start_at: dt.datetime, end_at: dt.datetime) -> List[Dict[str, str]]:
     svc = _get_service()
+    timezone = settings.GOOGLE_CALENDAR_TIMEZONE
+    start_rfc3339 = to_google_rfc3339(start_at, timezone)
+    end_rfc3339 = to_google_rfc3339(end_at, timezone)
     if not svc:
+        start_aware = ensure_aware(start_at, timezone)
+        end_aware = ensure_aware(end_at, timezone)
         return [
-            {"start": _rfc3339(event.start_at), "end": _rfc3339(event.end_at)}
+            {"start": to_google_rfc3339(event.start_at, timezone), "end": to_google_rfc3339(event.end_at, timezone)}
             for event in CALENDAR_STORE.events.values()
-            if event.status != "cancelled" and _overlaps(start_at, end_at, event.start_at, event.end_at)
+            if event.status != "cancelled"
+            and _overlaps(
+                start_aware,
+                end_aware,
+                ensure_aware(event.start_at, timezone),
+                ensure_aware(event.end_at, timezone),
+            )
         ]
 
     body = {
-        "timeMin": _rfc3339(start_at),
-        "timeMax": _rfc3339(end_at),
-        "timeZone": settings.GOOGLE_CALENDAR_TIMEZONE,
+        "timeMin": start_rfc3339,
+        "timeMax": end_rfc3339,
+        "timeZone": timezone,
         "items": [{"id": settings.GOOGLE_CALENDAR_ID}],
     }
+    logger.info(
+        "calendar_freebusy_request freebusy_time_min=%s freebusy_time_max=%s timezone=%s calendar_id=%s",
+        start_rfc3339,
+        end_rfc3339,
+        timezone,
+        _mask_calendar_id(settings.GOOGLE_CALENDAR_ID),
+    )
     result = svc.freebusy().query(body=body).execute()
     return result.get("calendars", {}).get(settings.GOOGLE_CALENDAR_ID, {}).get("busy", [])
 
@@ -109,13 +145,21 @@ def create_event(
     metadata: Optional[Dict[str, Any]] = None,
 ) -> str:
     svc = _get_service()
+    timezone = settings.GOOGLE_CALENDAR_TIMEZONE
+    start_rfc3339 = to_google_rfc3339(start_at, timezone)
+    end_rfc3339 = to_google_rfc3339(end_at, timezone)
     if not svc:
         logger.info(
             "calendar_create_attempt use_real_calendar=%s mode=mock event_id=%s",
             settings.USE_REAL_CALENDAR,
             event_id,
         )
-        CALENDAR_STORE.events[event_id] = CalendarEvent(event_id, start_at, end_at, summary)
+        CALENDAR_STORE.events[event_id] = CalendarEvent(
+            event_id,
+            ensure_aware(start_at, timezone),
+            ensure_aware(end_at, timezone),
+            summary,
+        )
         logger.info(
             "calendar_create_success use_real_calendar=%s mode=mock calendar_event_id=%s",
             settings.USE_REAL_CALENDAR,
@@ -127,17 +171,20 @@ def create_event(
         "id": event_id,
         "summary": summary,
         "description": description,
-        "start": {"dateTime": _rfc3339(start_at), "timeZone": settings.GOOGLE_CALENDAR_TIMEZONE},
-        "end": {"dateTime": _rfc3339(end_at), "timeZone": settings.GOOGLE_CALENDAR_TIMEZONE},
+        "start": {"dateTime": start_rfc3339, "timeZone": timezone},
+        "end": {"dateTime": end_rfc3339, "timeZone": timezone},
         "extendedProperties": {"private": {k: str(v) for k, v in (metadata or {}).items()}},
         "reminders": {"useDefault": True},
     }
     try:
         logger.info(
-            "calendar_create_attempt use_real_calendar=%s mode=real event_id=%s calendar_id=%s",
+            "calendar_create_attempt use_real_calendar=%s mode=real event_id=%s calendar_id=%s create_event_start=%s create_event_end=%s timezone=%s",
             settings.USE_REAL_CALENDAR,
             event_id,
-            settings.GOOGLE_CALENDAR_ID,
+            _mask_calendar_id(settings.GOOGLE_CALENDAR_ID),
+            start_rfc3339,
+            end_rfc3339,
+            timezone,
         )
         result = svc.events().insert(calendarId=settings.GOOGLE_CALENDAR_ID, body=body).execute()
     except Exception as exc:
@@ -159,22 +206,25 @@ def create_event(
 
 def update_event(event_id: str, *, start_at: dt.datetime, end_at: dt.datetime, summary: Optional[str] = None) -> bool:
     svc = _get_service()
+    timezone = settings.GOOGLE_CALENDAR_TIMEZONE
+    start_rfc3339 = to_google_rfc3339(start_at, timezone)
+    end_rfc3339 = to_google_rfc3339(end_at, timezone)
     if not svc:
         event = CALENDAR_STORE.events.get(event_id)
         if not event:
             return False
         CALENDAR_STORE.events[event_id] = CalendarEvent(
             event_id,
-            start_at,
-            end_at,
+            ensure_aware(start_at, timezone),
+            ensure_aware(end_at, timezone),
             summary or event.summary,
             event.status,
         )
         return True
 
     event = svc.events().get(calendarId=settings.GOOGLE_CALENDAR_ID, eventId=event_id).execute()
-    event["start"] = {"dateTime": _rfc3339(start_at), "timeZone": settings.GOOGLE_CALENDAR_TIMEZONE}
-    event["end"] = {"dateTime": _rfc3339(end_at), "timeZone": settings.GOOGLE_CALENDAR_TIMEZONE}
+    event["start"] = {"dateTime": start_rfc3339, "timeZone": timezone}
+    event["end"] = {"dateTime": end_rfc3339, "timeZone": timezone}
     if summary:
         event["summary"] = summary
     svc.events().update(calendarId=settings.GOOGLE_CALENDAR_ID, eventId=event_id, body=event).execute()
@@ -205,8 +255,8 @@ def find_event_by_id(event_id: str) -> Optional[Dict[str, Any]]:
             "id": event.id,
             "summary": event.summary,
             "status": event.status,
-            "start": {"dateTime": _rfc3339(event.start_at)},
-            "end": {"dateTime": _rfc3339(event.end_at)},
+            "start": {"dateTime": to_google_rfc3339(event.start_at, settings.GOOGLE_CALENDAR_TIMEZONE)},
+            "end": {"dateTime": to_google_rfc3339(event.end_at, settings.GOOGLE_CALENDAR_TIMEZONE)},
         }
 
     try:

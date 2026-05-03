@@ -1,10 +1,20 @@
 import datetime as dt
 import asyncio
 
+from googleapiclient.errors import HttpError
+
 from app.config.settings import settings
 from app.services.booking_service import confirm_slot, get_appointment_status, propose_slots
 from app.services.calendar_service import CALENDAR_STORE
 from app.services.supabase_repo import STORE
+
+
+class _HttpResponse:
+    status = 400
+    reason = "Bad Request"
+
+    def get(self, _key, default=None):
+        return default
 
 
 def test_booking_service_confirms_mock_appointment():
@@ -87,6 +97,32 @@ def test_real_calendar_failure_does_not_create_confirmed_appointment(monkeypatch
     assert not result.ok
     assert result.reason == "integration_error"
     assert not [item for item in STORE.appointments.values() if item.get("status") == "confirmed"]
+    assert all(lock["status"] == "released" for lock in STORE.locks.values())
+
+
+def test_real_calendar_freebusy_http_error_does_not_confirm_appointment(monkeypatch):
+    STORE.reset()
+    CALENDAR_STORE.reset()
+    start = dt.datetime(2026, 5, 4, 10, 0)
+
+    monkeypatch.setattr(settings, "USE_REAL_CALENDAR", True)
+    monkeypatch.setattr(settings, "GOOGLE_CALENDAR_ID", "calendar-real")
+
+    def fail_free_busy(*_args):
+        raise HttpError(_HttpResponse(), b'{"error":{"message":"Bad Request"}}')
+
+    monkeypatch.setattr("app.services.booking_service.calendar_service.free_busy", fail_free_busy)
+
+    result = asyncio.run(confirm_slot(
+        channel="whatsapp",
+        external_user_id="+34600000001",
+        service_type="sesion de fisioterapia",
+        start_at=start,
+    ))
+
+    assert not result.ok
+    assert result.reason == "integration_error"
+    assert not STORE.appointments
     assert all(lock["status"] == "released" for lock in STORE.locks.values())
 
 

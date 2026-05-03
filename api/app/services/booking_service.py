@@ -91,16 +91,16 @@ async def confirm_slot(
     if not lock_ok:
         return BookingResult(False, reason="double_booking")
 
-    if calendar_service.free_busy(start_at, end_at):
-        await supabase_repo.release_booking_lock(
-            clinic_id=clinic_id,
-            resource_id=resource_id,
-            start_at=start_at,
-            end_at=end_at,
-        )
-        return BookingResult(False, reason="calendar_busy")
-
     try:
+        if calendar_service.free_busy(start_at, end_at):
+            await supabase_repo.release_booking_lock(
+                clinic_id=clinic_id,
+                resource_id=resource_id,
+                start_at=start_at,
+                end_at=end_at,
+            )
+            return BookingResult(False, reason="calendar_busy")
+
         patient = await supabase_repo.upsert_patient_by_phone(
             clinic_id=clinic_id,
             phone=external_user_id,
