@@ -92,6 +92,26 @@ async def confirm_slot(
         return BookingResult(False, reason="double_booking")
 
     try:
+        patient = await supabase_repo.upsert_patient_by_phone(
+            clinic_id=clinic_id,
+            phone=external_user_id,
+            name=patient_name,
+        )
+        if not patient.get("name"):
+            logger.warning(
+                "booking_confirm_missing_patient_name channel=%s external_user_present=%s use_real_calendar=%s",
+                channel,
+                bool(external_user_id),
+                settings.USE_REAL_CALENDAR,
+            )
+            await supabase_repo.release_booking_lock(
+                clinic_id=clinic_id,
+                resource_id=resource_id,
+                start_at=start_at,
+                end_at=end_at,
+            )
+            return BookingResult(False, reason="patient_name_required")
+
         if calendar_service.free_busy(start_at, end_at):
             await supabase_repo.release_booking_lock(
                 clinic_id=clinic_id,
@@ -101,11 +121,6 @@ async def confirm_slot(
             )
             return BookingResult(False, reason="calendar_busy")
 
-        patient = await supabase_repo.upsert_patient_by_phone(
-            clinic_id=clinic_id,
-            phone=external_user_id,
-            name=patient_name,
-        )
         event_id = calendar_service.build_deterministic_event_id(
             clinic_id,
             external_user_id,

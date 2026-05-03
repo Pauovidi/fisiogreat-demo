@@ -28,6 +28,7 @@ def test_booking_service_confirms_mock_appointment():
         external_user_id="+34600000001",
         service_type="sesion de fisioterapia",
         start_at=start,
+        patient_name="Pau Marco",
     ))
 
     assert result.ok
@@ -63,6 +64,7 @@ def test_real_calendar_success_creates_event_before_confirmed_appointment(monkey
         external_user_id="+34600000001",
         service_type="sesion de fisioterapia",
         start_at=start,
+        patient_name="Pau Marco",
     ))
 
     assert result.ok
@@ -72,6 +74,36 @@ def test_real_calendar_success_creates_event_before_confirmed_appointment(monkey
     ]
     assert result.appointment["calendar_event_id"] == "real-event-123"
     assert result.appointment["status"] == "confirmed"
+
+
+def test_confirm_slot_without_patient_name_does_not_create_calendar_or_appointment(monkeypatch):
+    STORE.reset()
+    CALENDAR_STORE.reset()
+    start = dt.datetime(2026, 5, 4, 10, 0)
+    create_event_calls = []
+
+    monkeypatch.setattr(settings, "USE_REAL_CALENDAR", True)
+    monkeypatch.setattr(settings, "GOOGLE_CALENDAR_ID", "calendar-real")
+    monkeypatch.setattr("app.services.booking_service.calendar_service.free_busy", lambda *_args: [])
+
+    def fake_create_event(**kwargs):
+        create_event_calls.append(kwargs)
+        return "should-not-happen"
+
+    monkeypatch.setattr("app.services.booking_service.calendar_service.create_event", fake_create_event)
+
+    result = asyncio.run(confirm_slot(
+        channel="whatsapp",
+        external_user_id="+34600000001",
+        service_type="sesion de fisioterapia",
+        start_at=start,
+    ))
+
+    assert not result.ok
+    assert result.reason == "patient_name_required"
+    assert create_event_calls == []
+    assert not STORE.appointments
+    assert all(lock["status"] == "released" for lock in STORE.locks.values())
 
 
 def test_real_calendar_failure_does_not_create_confirmed_appointment(monkeypatch):
@@ -93,6 +125,7 @@ def test_real_calendar_failure_does_not_create_confirmed_appointment(monkeypatch
         external_user_id="+34600000001",
         service_type="sesion de fisioterapia",
         start_at=start,
+        patient_name="Pau Marco",
     ))
 
     assert not result.ok
@@ -119,6 +152,7 @@ def test_real_calendar_freebusy_http_error_does_not_confirm_appointment(monkeypa
         external_user_id="+34600000001",
         service_type="sesion de fisioterapia",
         start_at=start,
+        patient_name="Pau Marco",
     ))
 
     assert not result.ok
@@ -152,6 +186,7 @@ def test_patient_failure_does_not_create_calendar_or_confirmed_appointment(monke
         external_user_id="+34600000001",
         service_type="sesion de fisioterapia",
         start_at=start,
+        patient_name="Pau Marco",
     ))
 
     assert not result.ok
@@ -183,6 +218,7 @@ def test_existing_patient_and_calendar_ok_confirms_appointment(monkeypatch):
         external_user_id="+34600000001",
         service_type="sesion de fisioterapia",
         start_at=start,
+        patient_name="Pau Marco",
     ))
 
     assert result.ok
@@ -204,6 +240,7 @@ def test_mock_calendar_allows_confirmation(monkeypatch):
         external_user_id="+34600000001",
         service_type="sesion de fisioterapia",
         start_at=start,
+        patient_name="Pau Marco",
     ))
 
     assert result.ok

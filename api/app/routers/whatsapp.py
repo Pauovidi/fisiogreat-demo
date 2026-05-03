@@ -1,5 +1,4 @@
 import datetime as dt
-import re
 import urllib.parse as up
 from typing import List, Optional
 
@@ -23,6 +22,7 @@ from ..utils.intent_router import detect_service, normalize_text, route_message
 from ..utils.emergency_guard import detect_emergency, emergency_reply
 from ..utils.logger import logger
 from ..utils.mini_context import CTX
+from ..utils.patient_name import first_name, parse_patient_name
 from ..utils.slot_picker import pick_slot
 from ..utils.whatsapp_copy import WA_COPY as copy
 
@@ -66,12 +66,6 @@ def _normalize_key(raw_from: str) -> str:
 
 def _format_slot_label(slot_dt: dt.datetime) -> str:
     return f"{WEEKDAY_LABELS[slot_dt.weekday()]} {slot_dt.strftime('%d/%m')} a las {slot_dt.strftime('%H:%M')}"
-
-
-def _first_name(patient_name: Optional[str]) -> Optional[str]:
-    if not patient_name:
-        return None
-    return patient_name.strip().split()[0] if patient_name.strip() else None
 
 
 def _dummy_slot_labels(date_pref: dt.date, time_pref: Optional[str], count: int) -> List[str]:
@@ -151,7 +145,7 @@ def _faq_with_reengagement(key: str, faq_id: str = "hours") -> str:
 
 
 def _is_state_interrupt(route_type: str) -> bool:
-    return route_type in {"faq", "cancel", "reschedule", "out_of_scope", "greeting", "booking", "more_options"}
+    return route_type in {"faq", "cancel", "reschedule", "out_of_scope", "greeting", "booking", "more_options", "unsupported_service"}
 
 
 RESET_COMMANDS = {
@@ -194,65 +188,49 @@ async def _clear_conversation_flow(key: str, *, reason: str) -> None:
         logger.warning("WA reset session update failed for %s: %r", key, exc)
 
 
-def _is_generic_profile_name(profile_name: str) -> bool:
-    normalized = normalize_text(profile_name)
-    return not normalized or normalized in {"whatsapp", "usuario", "user", "cliente", "fisio", "fisiogreat"}
+def _is_reliable_patient_name(ctx: dict) -> bool:
+    return bool(ctx.get("patient_name")) and ctx.get("patient_name_source") in {"manual", "supabase"}
 
 
-def _parse_patient_name(body: str) -> Optional[str]:
-    normalized = normalize_text(body)
-    if not normalized:
-        return None
-    if parse_spanish_day(body) or detect_service(body):
-        return None
-    route = route_message(body)
-    if route["type"] in {
-        "faq",
-        "cancel",
-        "reschedule",
-        "booking",
-        "more_options",
-        "thanks",
-        "acknowledgement",
-        "farewell",
-        "out_of_scope",
-        "greeting",
-        "pick_slot",
-    }:
-        return None
-
-    cleaned = body.strip()
-    patterns = [
-        r"^\s*me llamo\s+(.+)$",
-        r"^\s*soy\s+(.+)$",
-        r"^\s*a nombre de\s+(.+)$",
-    ]
-    for pattern in patterns:
-        match = re.match(pattern, cleaned, flags=re.IGNORECASE)
-        if match:
-            cleaned = match.group(1).strip()
-            break
-
-    cleaned = re.sub(r"\s+", " ", cleaned)
-    if not re.fullmatch(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ' -]{2,60}", cleaned):
-        return None
-    return " ".join(part.capitalize() for part in cleaned.split())
-
-
-async def _resolve_patient_name(key: str, *, profile_name: Optional[str]) -> tuple[Optional[str], Optional[str]]:
-    profile_candidate = None if not profile_name or _is_generic_profile_name(profile_name) else _parse_patient_name(profile_name)
+async def _resolve_patient_name(key: str) -> tuple[Optional[str], Optional[str]]:
     patient = await supabase_repo.get_or_create_patient(
         clinic_id=settings.DEMO_CLINIC_ID,
         phone=key,
-        name=profile_candidate,
+        name=None,
     )
     if patient.get("name"):
-        source = "profile" if profile_candidate and patient["name"] == profile_candidate else "supabase"
-        CTX.set_patient_name(key, patient["name"], source)
-        logger.info("patient_name_collected=true patient_name_source=%s", source)
-        return patient["name"], source
+        CTX.set_patient_name(key, patient["name"], "supabase")
+        logger.info("patient_name_collected=true patient_name_source=supabase")
+        return patient["name"], "supabase"
     logger.info("patient_name_collected=false patient_name_source=missing")
     return None, None
+
+
+async def _ensure_patient_name_before_slots_or_confirmation(
+    key: str,
+    *,
+    service: Optional[str],
+    reason: str,
+) -> Optional[str]:
+    if service:
+        CTX.set_service(key, service)
+    ctx = CTX.get(key) or {}
+    if _is_reliable_patient_name(ctx):
+        return ctx["patient_name"]
+    patient_name, _source = await _resolve_patient_name(key)
+    if patient_name:
+        return patient_name
+    CTX.set_stage(key, "awaiting_patient_name")
+    logger.info("patient_name_required_before_booking reason=%s has_service=%s", reason, bool(service))
+    return None
+
+
+def _patient_name_prompt(*, service: Optional[str], reason: str) -> str:
+    if reason == "slots":
+        return copy.ask_patient_name_before_slots()
+    if reason == "confirmation":
+        return copy.ask_patient_name_before_confirmation()
+    return copy.ask_patient_name(service)
 
 
 async def _store_manual_patient_name(key: str, patient_name: str) -> None:
@@ -284,7 +262,6 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
         params = up.parse_qs((await request.body()).decode())
         body = (params.get("Body", [""])[0] or "").strip()
         wa_from = _normalize_key(params.get("From", [""])[0])
-        profile_name = (params.get("ProfileName", [""])[0] or "").strip()
         logger.info(f"WA from {wa_from}: {body}")
 
         current_stage = CTX.get_stage(wa_from)
@@ -321,25 +298,36 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
         if current_stage == "awaiting_service":
             service = detect_service(body)
             if service:
-                CTX.set_service(wa_from, service)
-                patient_name, _source = await _resolve_patient_name(wa_from, profile_name=profile_name)
-                if patient_name:
-                    CTX.set_stage(wa_from, "awaiting_date")
-                    return _twiml(copy.ask_date(service))
-                CTX.set_stage(wa_from, "awaiting_patient_name")
-                return _twiml(copy.ask_patient_name(service))
+                patient_name = await _ensure_patient_name_before_slots_or_confirmation(
+                    wa_from,
+                    service=service,
+                    reason="service",
+                )
+                if not patient_name:
+                    return _twiml(_patient_name_prompt(service=service, reason="service"))
+                CTX.set_stage(wa_from, "awaiting_date")
+                return _twiml(copy.ask_date(service))
 
             route_peek = route_message(body)
+            if route_peek["type"] == "unsupported_service":
+                return _twiml(copy.unsupported_service())
             if not _is_state_interrupt(route_peek["type"]):
                 return _twiml(copy.ask_service_retry())
 
         elif current_stage == "awaiting_patient_name":
-            patient_name = _parse_patient_name(body)
+            route_peek = route_message(body)
+            if parse_spanish_day(body):
+                return _twiml(copy.ask_patient_name_before_slots())
+            if route_peek["type"] == "pick_slot":
+                return _twiml(copy.ask_patient_name_before_confirmation())
+            if route_peek["type"] == "unsupported_service":
+                return _twiml(copy.unsupported_service())
+            patient_name = parse_patient_name(body)
             if not patient_name:
                 return _twiml("No he entendido bien el nombre. ¿A qué nombre dejamos la cita?")
             await _store_manual_patient_name(wa_from, patient_name)
             CTX.set_stage(wa_from, "awaiting_date")
-            return _twiml(copy.thanks_name_then_date(_first_name(patient_name) or patient_name))
+            return _twiml(copy.thanks_name_then_date(first_name(patient_name) or patient_name))
 
         elif current_stage == "awaiting_date":
             parsed_date = parse_spanish_day(body)
@@ -350,6 +338,13 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
                 if not service:
                     CTX.set_stage(wa_from, "awaiting_service")
                     return _twiml(copy.ask_service_retry())
+                patient_name = await _ensure_patient_name_before_slots_or_confirmation(
+                    wa_from,
+                    service=service,
+                    reason="slots",
+                )
+                if not patient_name:
+                    return _twiml(_patient_name_prompt(service=service, reason="slots"))
 
                 CTX.set_date(wa_from, parsed_date)
                 CTX.set_time_pref(wa_from, time_pref)
@@ -358,6 +353,8 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
                 return _twiml(copy.propose_slots(CTX.next_slots(wa_from, WA_PAGE_SIZE)))
 
             route_peek = route_message(body)
+            if route_peek["type"] == "unsupported_service":
+                return _twiml(copy.unsupported_service())
             if not _is_state_interrupt(route_peek["type"]):
                 return _twiml(copy.ask_date_retry())
 
@@ -367,6 +364,13 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
             if selected:
                 ctx = CTX.get(wa_from) or {}
                 service = ctx.get("service") or "sesion de fisioterapia"
+                patient_name = await _ensure_patient_name_before_slots_or_confirmation(
+                    wa_from,
+                    service=service,
+                    reason="confirmation",
+                )
+                if not patient_name:
+                    return _twiml(_patient_name_prompt(service=service, reason="confirmation"))
                 selected_dt = parse_slot_label(selected)
                 logger.info(
                     "wa_slot_selected selected_option=%s proposed_slot_label=%s use_real_calendar=%s",
@@ -382,7 +386,7 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
                     external_user_id=wa_from,
                     service_type=service,
                     start_at=selected_dt,
-                    patient_name=ctx.get("patient_name"),
+                    patient_name=patient_name,
                     metadata={"slot_label": selected},
                 )
                 if not booking_result.ok:
@@ -394,7 +398,7 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
                         settings.USE_REAL_CALENDAR,
                     )
                     return _twiml("No he podido confirmar ese hueco ahora mismo. Dime otro día y lo reviso.")
-                patient_name = (booking_result.appointment or {}).get("metadata", {}).get("patient_name") or ctx.get("patient_name")
+                patient_name = (booking_result.appointment or {}).get("metadata", {}).get("patient_name") or patient_name
                 CTX.clear_flow(wa_from)
                 CTX.set_last_confirmed_slot(
                     wa_from,
@@ -405,6 +409,8 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
                 return _twiml(copy.confirm_booking(selected, service, patient_name))
 
             route_peek = route_message(body)
+            if route_peek["type"] == "unsupported_service":
+                return _twiml(copy.unsupported_service())
             if route_peek["type"] == "more_options":
                 next_batch = CTX.next_slots(wa_from, WA_PAGE_SIZE)
                 if next_batch:
@@ -421,7 +427,7 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
                 appointment = supabase_repo.STORE.appointments.get(appointment_id) or {}
                 patient_name = (appointment.get("metadata") or {}).get("patient_name")
                 await cancel_appointment(appointment_id)
-                first = _first_name(patient_name)
+                first = first_name(patient_name)
                 prefix = f"Listo, {first}, " if first else "Listo, "
                 return _twiml(f"{prefix}he dejado la cita cancelada.")
             return _twiml("No encuentro una cita activa para cancelar desde este chat. Te paso con el equipo.")
@@ -438,7 +444,7 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
                 )
                 CTX.clear_flow(wa_from)
                 appointment = supabase_repo.STORE.appointments.get(appointment_id) or {}
-                first = _first_name((appointment.get("metadata") or {}).get("patient_name"))
+                first = first_name((appointment.get("metadata") or {}).get("patient_name"))
                 prefix = f"Listo, {first}, " if first else "Listo, "
                 return _twiml(f"{prefix}he cambiado la cita. Te queda confirmada para el nuevo día a las 10:00.")
             return _twiml("Dime el nuevo día, por ejemplo mañana o jueves.")
@@ -454,15 +460,20 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
             CTX.clear_flow(wa_from)
             service = route.get("service")
             if service:
-                CTX.set_service(wa_from, service)
-                patient_name, _source = await _resolve_patient_name(wa_from, profile_name=profile_name)
-                if patient_name:
-                    CTX.set_stage(wa_from, "awaiting_date")
-                    return _twiml(copy.ask_date(service))
-                CTX.set_stage(wa_from, "awaiting_patient_name")
-                return _twiml(copy.ask_patient_name(service))
+                patient_name = await _ensure_patient_name_before_slots_or_confirmation(
+                    wa_from,
+                    service=service,
+                    reason="service",
+                )
+                if not patient_name:
+                    return _twiml(_patient_name_prompt(service=service, reason="service"))
+                CTX.set_stage(wa_from, "awaiting_date")
+                return _twiml(copy.ask_date(service))
             CTX.set_stage(wa_from, "awaiting_service")
             return _twiml(copy.ask_service())
+
+        if route_type == "unsupported_service":
+            return _twiml(copy.unsupported_service())
 
         if route_type == "faq":
             return _twiml(_faq_with_reengagement(wa_from, route.get("faq_id", "hours")))

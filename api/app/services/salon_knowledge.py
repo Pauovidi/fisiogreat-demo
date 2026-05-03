@@ -5,11 +5,10 @@ from ..config.settings import settings
 
 DEFAULT_LOCATION = "ubicacion pendiente de configurar"
 DEFAULT_HOURS = "Lunes a viernes 09:00-20:00 | Sabado 10:00-14:00 | Domingo cerrado"
-DEFAULT_SERVICES = "primera visita de fisioterapia, sesion de fisioterapia, valoracion inicial, consulta de seguimiento"
+DEFAULT_SERVICES = "valoracion inicial, sesion de fisioterapia, consulta de seguimiento"
 DEFAULT_PRICE_GUIDANCE = "Los precios orientativos se configuraran en la ficha de la clinica."
 
 SERVICE_DURATION_HINTS = {
-    "primera visita de fisioterapia": "La primera visita suele durar unos 60 minutos.",
     "sesion de fisioterapia": "Una sesion de fisioterapia suele durar unos 45 minutos.",
     "sesión de fisioterapia": "Una sesion de fisioterapia suele durar unos 45 minutos.",
     "valoracion inicial": "La valoracion inicial suele durar unos 60 minutos.",
@@ -113,7 +112,7 @@ def _pricing_answer(channel: str) -> str:
 
 def _services_answer(channel: str) -> str:
     if channel == "voice":
-        return "Atendemos primera visita, sesion de fisioterapia, valoracion inicial y seguimiento."
+        return "Atendemos valoracion inicial, sesion de fisioterapia y consulta de seguimiento."
     return (
         "En esta demo puedo gestionar valoración inicial, sesión de fisioterapia y consulta de seguimiento. "
         "También puedo ayudarte a pedir, cambiar o cancelar una cita."

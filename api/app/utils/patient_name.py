@@ -36,6 +36,7 @@ def parse_patient_name(body: str) -> Optional[str]:
         "out_of_scope",
         "greeting",
         "pick_slot",
+        "unsupported_service",
     }:
         return None
 

@@ -19,12 +19,14 @@ async def run():
         external_user_id="+34600999004",
         service_type="sesion de fisioterapia",
         start_at=start,
+        patient_name="Pau Marco",
     )
     second = await confirm_slot(
         channel="voice",
         external_user_id="CA-smoke-double",
         service_type="sesion de fisioterapia",
         start_at=start,
+        patient_name="Ana Marco",
     )
     print(f"FIRST_OK: {first.ok}")
     print(f"SECOND_OK: {second.ok}")

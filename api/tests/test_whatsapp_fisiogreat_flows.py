@@ -67,15 +67,50 @@ def test_whatsapp_existing_named_patient_skips_name_prompt():
     assert CTX.get(user)["patient_name"] == "Ana Marco"
 
 
-def test_whatsapp_profile_name_can_seed_patient_name():
+def test_whatsapp_profile_name_does_not_skip_patient_name_prompt():
     user = "+34600000023"
     reset_state(user)
 
     post_whatsapp(user, "quiero cita", profile_name="Pau Marco")
     response = post_whatsapp(user, "fisioterapia", profile_name="Pau Marco")
 
-    assert "qué día" in response.text.lower()
-    assert CTX.get(user)["patient_name"] == "Pau Marco"
+    assert "nombre" in response.text.lower()
+    assert not CTX.get(user).get("patient_name")
+
+
+def test_whatsapp_necesito_sesion_fisio_without_patient_name_asks_name():
+    user = "+34600000029"
+    reset_state(user)
+
+    response = post_whatsapp(user, "necesito una sesión de fisio")
+
+    assert "nombre" in response.text.lower()
+    assert CTX.get_stage(user) == "awaiting_patient_name"
+    assert CTX.get(user)["service"] == "sesion de fisioterapia"
+
+
+def test_whatsapp_date_before_patient_name_does_not_offer_slots():
+    user = "+34600000030"
+    reset_state(user)
+
+    post_whatsapp(user, "quiero sesión de fisio")
+    response = post_whatsapp(user, "el miércoles que viene")
+
+    assert "antes de buscar huecos" in response.text.lower()
+    assert CTX.get_stage(user) == "awaiting_patient_name"
+    assert CTX.get(user)["offered_slots"] == []
+
+
+def test_whatsapp_slot_number_before_patient_name_does_not_confirm():
+    user = "+34600000031"
+    reset_state(user)
+
+    post_whatsapp(user, "quiero sesión de fisio")
+    response = post_whatsapp(user, "2")
+
+    assert "antes de confirmar" in response.text.lower()
+    assert CTX.get_stage(user) == "awaiting_patient_name"
+    assert not STORE.appointments
 
 
 def test_whatsapp_second_option_confirms_only_after_calendar_ok(monkeypatch):
@@ -308,6 +343,38 @@ def test_whatsapp_services_and_hours_faq_are_distinct():
     assert "pedir, cambiar o cancelar una cita" in services
     assert "nuestro horario" not in services.lower()
     assert "nuestro horario" in hours.lower()
+
+
+def test_whatsapp_valid_services_are_closed_catalog_and_ask_name():
+    cases = [
+        ("quiero valoración inicial", "valoracion inicial"),
+        ("quiero una primera visita", "valoracion inicial"),
+        ("quiero seguimiento", "consulta de seguimiento"),
+        ("quiero una revisión", "consulta de seguimiento"),
+        ("quiero sesión de fisio", "sesion de fisioterapia"),
+    ]
+    for index, (message, expected_service) in enumerate(cases, start=1):
+        user = f"+346000001{index:02d}"
+        reset_state(user)
+
+        response = post_whatsapp(user, message)
+
+        assert "nombre" in response.text.lower()
+        assert CTX.get_stage(user) == "awaiting_patient_name"
+        assert CTX.get(user)["service"] == expected_service
+
+
+def test_whatsapp_unsupported_services_do_not_start_booking():
+    for index, message in enumerate(["quiero pilates", "quiero masaje", "quiero osteopatía"], start=1):
+        user = f"+346000002{index:02d}"
+        reset_state(user)
+
+        response = post_whatsapp(user, message)
+
+        assert "valoración inicial, sesión de fisioterapia y consulta de seguimiento" in response.text
+        assert "derivarte a una persona" in response.text.lower()
+        assert CTX.get_stage(user) == "idle"
+        assert not STORE.appointments
 
 
 def test_whatsapp_greeting_is_neutral_and_does_not_start_booking():

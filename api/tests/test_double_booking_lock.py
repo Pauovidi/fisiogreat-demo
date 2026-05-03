@@ -16,12 +16,14 @@ def test_double_booking_lock_blocks_same_slot():
         external_user_id="+34600000001",
         service_type="sesion de fisioterapia",
         start_at=start,
+        patient_name="Pau Marco",
     ))
     second = asyncio.run(confirm_slot(
         channel="voice",
         external_user_id="CA-double",
         service_type="sesion de fisioterapia",
         start_at=start,
+        patient_name="Ana Marco",
     ))
 
     assert first.ok

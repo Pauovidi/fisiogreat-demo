@@ -3,6 +3,27 @@ import unicodedata
 from typing import Any, Dict, Optional
 
 
+SUPPORTED_SERVICES = {
+    "valoracion inicial",
+    "sesion de fisioterapia",
+    "consulta de seguimiento",
+}
+
+UNSUPPORTED_SERVICE_TERMS = {
+    "pilates",
+    "masaje",
+    "osteopatia",
+    "osteopata",
+    "readaptacion",
+    "entrenamiento",
+    "nutricion",
+    "suelo pelvico",
+    "ondas de choque",
+    "ecografia",
+    "podologia",
+}
+
+
 def normalize_text(text: str) -> str:
     text = unicodedata.normalize("NFKD", text.lower())
     text = "".join(ch for ch in text if not unicodedata.combining(ch))
@@ -14,30 +35,21 @@ def detect_service(text: str) -> Optional[str]:
     normalized = normalize_text(text)
 
     if any(phrase in normalized for phrase in ["primera visita", "primera cita"]):
-        return "primera visita de fisioterapia"
+        return "valoracion inicial"
     if any(phrase in normalized for phrase in ["valoracion inicial", "evaluacion inicial"]):
         return "valoracion inicial"
     if any(phrase in normalized for phrase in ["seguimiento", "consulta de seguimiento", "revision"]):
         return "consulta de seguimiento"
-    if any(phrase in normalized for phrase in ["fisioterapia", "fisio", "sesion", "sesion de fisio", "masaje"]):
+    if any(phrase in normalized for phrase in ["fisioterapia", "fisio", "sesion de fisio", "sesion de fisioterapia"]):
         return "sesion de fisioterapia"
+    return None
 
-    if "corte" in normalized and any(token in normalized for token in ["lavado", "lavar", "labado", "labar"]):
-        return "corte + lavado"
-    if ("raiz" in normalized or "raices" in normalized) and ("color" in normalized or "tinte" in normalized):
-        return "color raiz"
-    if "mechas" in normalized:
-        return "mechas"
-    if "peinado" in normalized or "peinar" in normalized:
-        return "peinado"
-    if ("corte" in normalized and "hombre" in normalized) or "caballero" in normalized:
-        return "corte hombre"
-    if "corte" in normalized and "mujer" in normalized:
-        return "corte mujer"
-    if any(token in normalized for token in ["color", "tinte", "coloracion"]):
-        return "color"
-    if any(token in normalized for token in ["corte", "cortar", "cortarme", "puntas", "corto", "pelado"]):
-        return "corte"
+
+def detect_unsupported_service(text: str) -> Optional[str]:
+    normalized = normalize_text(text)
+    for term in UNSUPPORTED_SERVICE_TERMS:
+        if term in normalized:
+            return term
     return None
 
 
@@ -129,6 +141,10 @@ def route_message(text: str) -> Dict[str, Any]:
     service = detect_service(text)
     if service:
         return {"type": "booking", "service": service}
+
+    unsupported_service = detect_unsupported_service(text)
+    if unsupported_service and any(token in normalized for token in ["quiero", "necesito", "reservar", "cita", "sesion"]):
+        return {"type": "unsupported_service", "service": unsupported_service}
 
     if any(token in normalized for token in ["reservar", "reserva", "cita", "quiero", "pedir hora", "sacar turno"]):
         return {"type": "booking"}

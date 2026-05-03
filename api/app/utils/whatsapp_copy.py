@@ -35,6 +35,14 @@ class WhatsAppCopy:
         return "Perfecto. ¿A qué nombre dejamos la cita?"
 
     @staticmethod
+    def ask_patient_name_before_slots() -> str:
+        return "Antes de buscar huecos, ¿a qué nombre dejamos la cita?"
+
+    @staticmethod
+    def ask_patient_name_before_confirmation() -> str:
+        return "Antes de confirmar, ¿a qué nombre dejamos la cita?"
+
+    @staticmethod
     def thanks_name_then_date(first_name: str) -> str:
         return f"Gracias, {first_name}. ¿Qué día te viene bien?"
 
@@ -100,6 +108,13 @@ class WhatsAppCopy:
     @staticmethod
     def out_of_scope() -> str:
         return "Ahora mismo te ayudo con citas, horarios y dudas básicas de FisioGreat."
+
+    @staticmethod
+    def unsupported_service() -> str:
+        return (
+            "En esta demo puedo gestionar valoración inicial, sesión de fisioterapia y consulta de seguimiento. "
+            "Para otros servicios, puedo derivarte a una persona del equipo. ¿Quieres reservar uno de estos servicios?"
+        )
 
     @staticmethod
     def technical_error() -> str:
