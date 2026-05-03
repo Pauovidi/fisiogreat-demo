@@ -80,17 +80,21 @@ def test_voice_basic_booking_and_faq_are_fisiogreat():
     assert "fisiogreat" in start.text.lower()
 
     service = post_voice(call_sid, SpeechResult="primera visita")
-    assert "que dia te va bien" in service.text.lower()
+    assert "nombre" in service.text.lower()
+
+    name = post_voice(call_sid, SpeechResult="Pau Marco")
+    assert "que dia te va bien" in name.text.lower()
 
     day = post_voice(call_sid, SpeechResult="jueves por la tarde")
     assert "tengo" in day.text.lower()
 
     pick = post_voice(call_sid, SpeechResult="segunda")
     assert "perfecto" in pick.text.lower()
+    assert "pau" in pick.text.lower()
     assert len(STORE.appointments) == 1
 
     thanks = post_voice(call_sid, SpeechResult="gracias")
-    assert "fisiogreat" in thanks.text.lower()
+    assert "te esperamos" in thanks.text.lower()
 
 
 def test_voice_reschedule_and_faq_prompts():
@@ -105,6 +109,36 @@ def test_voice_reschedule_and_faq_prompts():
     post_voice(call_sid)
     faq = post_voice(call_sid, SpeechResult="que servicios teneis")
     assert "fisioterapia" in faq.text.lower() or "valoracion" in faq.text.lower()
+
+
+def test_voice_can_cancel_and_reschedule_existing_booking():
+    cancel_sid = "CA-voice-cancel-1"
+    reset_state(cancel_sid)
+
+    post_voice(cancel_sid)
+    post_voice(cancel_sid, SpeechResult="primera visita")
+    post_voice(cancel_sid, SpeechResult="Pau Marco")
+    post_voice(cancel_sid, SpeechResult="jueves")
+    post_voice(cancel_sid, SpeechResult="primera")
+
+    post_voice(cancel_sid, SpeechResult="quiero cancelar la cita")
+    cancelled = post_voice(cancel_sid, SpeechResult="jueves a las diez")
+    assert "cancelada" in cancelled.text.lower()
+    assert next(iter(STORE.appointments.values()))["status"] == "cancelled"
+
+    reschedule_sid = "CA-voice-reschedule-1"
+    reset_state(reschedule_sid)
+
+    post_voice(reschedule_sid)
+    post_voice(reschedule_sid, SpeechResult="sesion de fisioterapia")
+    post_voice(reschedule_sid, SpeechResult="Pau Marco")
+    post_voice(reschedule_sid, SpeechResult="jueves")
+    post_voice(reschedule_sid, SpeechResult="primera")
+
+    post_voice(reschedule_sid, SpeechResult="quiero cambiar la cita")
+    changed = post_voice(reschedule_sid, SpeechResult="viernes")
+    assert "he cambiado la cita" in changed.text.lower()
+    assert next(iter(STORE.appointments.values()))["status"] == "rescheduled"
 
 
 def test_emergency_cuts_whatsapp_and_voice_without_booking():

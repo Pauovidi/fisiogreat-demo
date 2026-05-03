@@ -17,15 +17,21 @@ from ..services.conversation_relay import (
     handle_setup_message,
 )
 from ..services import supabase_repo
-from ..services.booking_service import confirm_slot, parse_slot_label
+from ..services.booking_service import (
+    cancel_appointment,
+    confirm_slot,
+    parse_slot_label,
+    propose_slots as booking_propose_slots,
+    reschedule_appointment,
+)
 from ..services.natural_turn import maybe_handle_natural_turn
 from ..services.salon_knowledge import out_of_scope_answer
-from ..services.slots import BusinessRules, propose_slots
 from ..utils.date_parser import parse_spanish_day, parse_time_pref
 from ..utils.intent_router import detect_service, route_message
 from ..utils.emergency_guard import detect_emergency, emergency_reply
 from ..utils.logger import logger
 from ..utils.mini_context import CTX
+from ..utils.patient_name import first_name, parse_patient_name
 from ..utils.slot_picker import pick_slot
 from ..utils.voice_copy import VOICE_COPY as copy
 
@@ -73,6 +79,54 @@ def _normalize_voice_text(text: str) -> str:
 def _looks_like_lavado_only(text: str) -> bool:
     normalized = _normalize_voice_text(text)
     return "lavado" in normalized and "corte" not in normalized
+
+
+def _latest_appointment_id(external_user_id: str) -> Optional[str]:
+    appointments = [
+        item
+        for item in supabase_repo.STORE.appointments.values()
+        if item.get("external_user_id") == external_user_id and item.get("status") != "cancelled"
+    ]
+    if not appointments:
+        return None
+    appointments.sort(key=lambda item: item.get("created_at", ""), reverse=True)
+    return appointments[0]["id"]
+
+
+async def _resolve_patient_name(key: str) -> Optional[str]:
+    patient = await supabase_repo.get_or_create_patient(
+        clinic_id=settings.DEMO_CLINIC_ID,
+        phone=key,
+        name=None,
+    )
+    if patient.get("name"):
+        CTX.set_patient_name(key, patient["name"], "supabase")
+        logger.info("voice_patient_name_collected=true patient_name_source=supabase")
+        return patient["name"]
+    logger.info("voice_patient_name_collected=false patient_name_source=missing")
+    return None
+
+
+async def _store_manual_patient_name(key: str, patient_name: str) -> None:
+    CTX.set_patient_name(key, patient_name, "manual")
+    try:
+        await supabase_repo.get_or_create_patient(
+            clinic_id=settings.DEMO_CLINIC_ID,
+            phone=key,
+            name=patient_name,
+        )
+    except Exception as exc:
+        logger.warning("voice_patient_name_store_failed key_present=%s error=%r", bool(key), exc)
+    logger.info("voice_patient_name_collected=true patient_name_source=manual")
+
+
+def _recent_booking_reply(key: str, *, farewell: bool = False) -> str:
+    ctx = CTX.get(key) or {}
+    slot = ctx.get("last_confirmed_slot")
+    patient_name = ctx.get("last_confirmed_patient_name")
+    if slot:
+        return copy.farewell_after_booking(slot, patient_name) if farewell else copy.thanks_after_booking(slot, patient_name)
+    return copy.farewell_generic() if farewell else copy.thanks_generic()
 
 
 def _mark_prompt(call_sid: str):
@@ -144,8 +198,11 @@ def _build_slot_labels(service: str, date_pref: dt.date, time_pref: Optional[str
     preferred_dt = dt.datetime.combine(date_pref, dt.time(preferred_hour, 0))
 
     try:
-        raw_slots = propose_slots(preferred_dt, service, BusinessRules())
-    except Exception:
+        raw_slots = booking_propose_slots(preferred_dt, service, count=count)
+    except Exception as exc:
+        logger.warning(f"voice_slot_generation_fallback service={service!r} error={exc!r}")
+        if settings.USE_REAL_CALENDAR:
+            return []
         raw_slots = []
 
     labels: List[str] = []
@@ -164,6 +221,8 @@ def _build_slot_labels(service: str, date_pref: dt.date, time_pref: Optional[str
             break
 
     if not labels:
+        if settings.USE_REAL_CALENDAR:
+            return []
         return _dummy_slot_labels(date_pref, time_pref, count)
     return labels
 
@@ -182,6 +241,12 @@ def _current_slots(key: str, page_size: int = VOICE_PAGE_SIZE) -> List[str]:
 def _reprompt_for_stage(call_sid: str) -> str:
     stage = CTX.get_stage(call_sid)
     ctx = CTX.get(call_sid) or {}
+    if stage == "awaiting_cancel_date":
+        return "Dime la fecha y la hora aproximada de la cita que quieres cancelar."
+    if stage == "awaiting_reschedule_date":
+        return "Dime el nuevo dia que te vendria mejor."
+    if stage == "awaiting_patient_name":
+        return copy.ask_patient_name(ctx.get("service"))
     if stage == "awaiting_date":
         return copy.ask_date(ctx.get("service"))
     if stage == "offering_slots":
@@ -410,6 +475,15 @@ async def agent_entry(
 
         route = route_message(user_text)
 
+        if route["type"] == "thanks":
+            stats["branch"] = "thanks"
+            stats["stage_after"] = current_stage
+            return _respond_gather(CallSid, _recent_booking_reply(CallSid), stats)
+        if route["type"] == "farewell":
+            stats["branch"] = "farewell"
+            stats["stage_after"] = current_stage
+            return _respond_gather(CallSid, _recent_booking_reply(CallSid, farewell=True), stats)
+
         if current_stage == "completed":
             if route["type"] in {"thanks", "acknowledgement"}:
                 stats["branch"] = route["type"]
@@ -420,27 +494,72 @@ async def agent_entry(
                 service = route.get("service")
                 if service:
                     CTX.set_service(CallSid, service)
-                    CTX.set_stage(CallSid, "awaiting_date")
-                    stats["branch"] = "completed_restart_booking_service"
-                    stats["stage_after"] = "awaiting_date"
-                    return _respond_gather(CallSid, copy.ask_date(service), stats)
+                    patient_name = await _resolve_patient_name(CallSid)
+                    if patient_name:
+                        CTX.set_stage(CallSid, "awaiting_date")
+                        stats["branch"] = "completed_restart_booking_service_patient_known"
+                        stats["stage_after"] = "awaiting_date"
+                        return _respond_gather(CallSid, copy.ask_date(service), stats)
+                    CTX.set_stage(CallSid, "awaiting_patient_name")
+                    stats["branch"] = "completed_restart_booking_service_ask_patient_name"
+                    stats["stage_after"] = "awaiting_patient_name"
+                    return _respond_gather(CallSid, copy.ask_patient_name(service), stats)
                 CTX.set_stage(CallSid, "awaiting_service")
                 stats["branch"] = "completed_restart_booking"
                 stats["stage_after"] = "awaiting_service"
                 return _respond_gather(CallSid, copy.ask_service_for_booking(), stats)
             if route["type"] == "reschedule":
                 CTX.clear_flow(CallSid)
+                CTX.set_stage(CallSid, "awaiting_reschedule_date")
                 stats["branch"] = "completed_reschedule"
-                stats["stage_after"] = "idle"
+                stats["stage_after"] = "awaiting_reschedule_date"
                 return _respond_gather(CallSid, "Claro. Dime la cita actual y el dia nuevo.", stats)
             if route["type"] == "cancel":
                 CTX.clear_flow(CallSid)
+                CTX.set_stage(CallSid, "awaiting_cancel_date")
                 stats["branch"] = "completed_cancel"
-                stats["stage_after"] = "idle"
+                stats["stage_after"] = "awaiting_cancel_date"
                 return _respond_gather(CallSid, "Puedo ayudarte a cancelarla. Dime la fecha y la hora aproximada.", stats)
             stats["branch"] = "completed_close"
             stats["stage_after"] = "completed"
             return _respond_gather(CallSid, copy.thanks_closing(), stats)
+
+        if current_stage == "awaiting_cancel_date":
+            appointment_id = _latest_appointment_id(CallSid)
+            CTX.clear_flow(CallSid)
+            if appointment_id:
+                appointment = supabase_repo.STORE.appointments.get(appointment_id) or {}
+                patient_name = (appointment.get("metadata") or {}).get("patient_name")
+                await cancel_appointment(appointment_id)
+                first = first_name(patient_name)
+                prefix = f"Listo, {first}, " if first else "Listo, "
+                stats["branch"] = "cancel_confirmed"
+                stats["stage_after"] = "idle"
+                return _respond_gather(CallSid, f"{prefix}he dejado la cita cancelada.", stats)
+            stats["branch"] = "cancel_not_found"
+            stats["stage_after"] = "idle"
+            return _respond_gather(CallSid, "No encuentro una cita activa para cancelar desde esta llamada.", stats)
+
+        if current_stage == "awaiting_reschedule_date":
+            parsed_date = parse_spanish_day(user_text)
+            appointment_id = _latest_appointment_id(CallSid)
+            if parsed_date and appointment_id:
+                new_start = dt.datetime.combine(parsed_date, dt.time(10, 0))
+                await reschedule_appointment(
+                    appointment_id,
+                    new_start_at=new_start,
+                    new_end_at=new_start + dt.timedelta(minutes=45),
+                )
+                CTX.clear_flow(CallSid)
+                appointment = supabase_repo.STORE.appointments.get(appointment_id) or {}
+                first = first_name((appointment.get("metadata") or {}).get("patient_name"))
+                prefix = f"Listo, {first}, " if first else "Listo, "
+                stats["branch"] = "reschedule_confirmed"
+                stats["stage_after"] = "idle"
+                return _respond_gather(CallSid, f"{prefix}he cambiado la cita. Te queda confirmada para el nuevo dia a las 10.", stats)
+            stats["branch"] = "reschedule_retry"
+            stats["stage_after"] = "awaiting_reschedule_date"
+            return _respond_gather(CallSid, "Dime el nuevo dia, por ejemplo manana o jueves.", stats)
 
         if current_stage == "awaiting_service":
             parse_start = time.perf_counter()
@@ -467,9 +586,13 @@ async def agent_entry(
                 return _respond_gather(CallSid, out_of_scope_answer("voice"), stats)
             if route_peek["type"] == "cancel":
                 stats["branch"] = "cancel"
+                CTX.set_stage(CallSid, "awaiting_cancel_date")
+                stats["stage_after"] = "awaiting_cancel_date"
                 return _respond_gather(CallSid, "Puedo ayudarte a cancelarla. Dime la fecha y la hora aproximada.", stats)
             if route_peek["type"] == "reschedule":
                 stats["branch"] = "reschedule"
+                CTX.set_stage(CallSid, "awaiting_reschedule_date")
+                stats["stage_after"] = "awaiting_reschedule_date"
                 return _respond_gather(CallSid, "Claro. Dime la cita actual y el dia nuevo.", stats)
             if route_peek["type"] == "booking" and not service:
                 stats["branch"] = "booking_without_service"
@@ -482,15 +605,29 @@ async def agent_entry(
 
             if service and parsed_date:
                 CTX.set_service(CallSid, service)
-                stats["branch"] = "service_and_date"
-                return _offer_slots(CallSid, service, parsed_date, time_pref, stats)
+                patient_name = await _resolve_patient_name(CallSid)
+                if patient_name:
+                    stats["branch"] = "service_date_patient_known"
+                    return _offer_slots(CallSid, service, parsed_date, time_pref, stats)
+                CTX.set_date(CallSid, parsed_date)
+                CTX.set_time_pref(CallSid, time_pref)
+                CTX.set_stage(CallSid, "awaiting_patient_name")
+                stats["branch"] = "service_date_ask_patient_name"
+                stats["stage_after"] = "awaiting_patient_name"
+                return _respond_gather(CallSid, copy.ask_patient_name(service), stats)
 
             if service:
                 CTX.set_service(CallSid, service)
-                CTX.set_stage(CallSid, "awaiting_date")
-                stats["branch"] = "service_ok"
-                stats["stage_after"] = "awaiting_date"
-                return _respond_gather(CallSid, copy.ask_date(service), stats)
+                patient_name = await _resolve_patient_name(CallSid)
+                if patient_name:
+                    CTX.set_stage(CallSid, "awaiting_date")
+                    stats["branch"] = "service_ok_patient_known"
+                    stats["stage_after"] = "awaiting_date"
+                    return _respond_gather(CallSid, copy.ask_date(service), stats)
+                CTX.set_stage(CallSid, "awaiting_patient_name")
+                stats["branch"] = "service_ok_ask_patient_name"
+                stats["stage_after"] = "awaiting_patient_name"
+                return _respond_gather(CallSid, copy.ask_patient_name(service), stats)
 
             natural = await maybe_handle_natural_turn(CallSid, user_text, page_size=VOICE_PAGE_SIZE)
             if natural.handled:
@@ -500,6 +637,25 @@ async def agent_entry(
 
             stats["branch"] = "service_retry"
             return _respond_gather(CallSid, copy.ask_service_retry(), stats)
+
+        if current_stage == "awaiting_patient_name":
+            patient_name = parse_patient_name(user_text)
+            if not patient_name:
+                stats["branch"] = "patient_name_retry"
+                stats["stage_after"] = "awaiting_patient_name"
+                return _respond_gather(CallSid, "No he entendido bien el nombre. A que nombre dejamos la cita?", stats)
+            await _store_manual_patient_name(CallSid, patient_name)
+            ctx = CTX.get(CallSid) or {}
+            service = ctx.get("service")
+            date_pref = ctx.get("date_pref")
+            time_pref = ctx.get("time_pref")
+            if service and date_pref:
+                stats["branch"] = "patient_name_then_slots"
+                return _offer_slots(CallSid, service, date_pref, time_pref, stats)
+            CTX.set_stage(CallSid, "awaiting_date")
+            stats["branch"] = "patient_name_then_date"
+            stats["stage_after"] = "awaiting_date"
+            return _respond_gather(CallSid, copy.thanks_name_then_date(first_name(patient_name) or patient_name), stats)
 
         if current_stage == "awaiting_date":
             parse_start = time.perf_counter()
@@ -538,6 +694,8 @@ async def agent_entry(
                 return _respond_gather(CallSid, out_of_scope_answer("voice"), stats)
             if route_peek["type"] == "reschedule":
                 stats["branch"] = "reschedule"
+                CTX.set_stage(CallSid, "awaiting_reschedule_date")
+                stats["stage_after"] = "awaiting_reschedule_date"
                 return _respond_gather(CallSid, "Claro. Dime el dia que te va mejor.", stats)
 
             stats["branch"] = "date_retry"
@@ -563,6 +721,7 @@ async def agent_entry(
                         external_user_id=CallSid,
                         service_type=service,
                         start_at=selected_dt,
+                        patient_name=ctx.get("patient_name"),
                         metadata={"slot_label": selected},
                     )
                     if not booking_result.ok:
@@ -572,12 +731,14 @@ async def agent_entry(
                             "Ese hueco acaba de ocuparse. Te digo otras opciones.",
                             stats,
                         )
+                appointment = booking_result.appointment if selected_dt else None
+                patient_name = (appointment or {}).get("metadata", {}).get("patient_name") or ctx.get("patient_name")
                 CTX.clear_flow(CallSid)
-                CTX.set_last_confirmed_slot(CallSid, selected)
+                CTX.set_last_confirmed_slot(CallSid, selected, service=service, patient_name=patient_name)
                 stats["branch"] = "slot_selected"
                 CTX.set_stage(CallSid, "completed")
                 stats["stage_after"] = "completed"
-                return _respond_gather(CallSid, copy.confirm_booking(selected), stats)
+                return _respond_gather(CallSid, copy.confirm_booking(selected, service, patient_name), stats)
 
             if reparsed_date:
                 ctx = CTX.get(CallSid) or {}
@@ -634,6 +795,8 @@ async def agent_entry(
                 return _respond_gather(CallSid, out_of_scope_answer("voice"), stats)
             if route_peek["type"] == "reschedule":
                 stats["branch"] = "reschedule"
+                CTX.set_stage(CallSid, "awaiting_reschedule_date")
+                stats["stage_after"] = "awaiting_reschedule_date"
                 return _respond_gather(CallSid, "Vale. Dime otro día o si prefieres mañana o tarde.", stats)
 
             stats["branch"] = "slot_retry"
@@ -655,14 +818,34 @@ async def agent_entry(
             service = route.get("service")
             if service:
                 CTX.set_service(CallSid, service)
-                CTX.set_stage(CallSid, "awaiting_date")
-                stats["branch"] = "booking_service"
-                stats["stage_after"] = "awaiting_date"
-                return _respond_gather(CallSid, copy.ask_date(service), stats)
+                patient_name = await _resolve_patient_name(CallSid)
+                if patient_name:
+                    CTX.set_stage(CallSid, "awaiting_date")
+                    stats["branch"] = "booking_service_patient_known"
+                    stats["stage_after"] = "awaiting_date"
+                    return _respond_gather(CallSid, copy.ask_date(service), stats)
+                CTX.set_stage(CallSid, "awaiting_patient_name")
+                stats["branch"] = "booking_service_ask_patient_name"
+                stats["stage_after"] = "awaiting_patient_name"
+                return _respond_gather(CallSid, copy.ask_patient_name(service), stats)
             CTX.set_stage(CallSid, "awaiting_service")
             stats["branch"] = "booking_no_service"
             stats["stage_after"] = "awaiting_service"
             return _respond_gather(CallSid, copy.ask_service_for_booking(), stats)
+
+        if route_type == "cancel":
+            CTX.clear_flow(CallSid)
+            CTX.set_stage(CallSid, "awaiting_cancel_date")
+            stats["branch"] = "cancel"
+            stats["stage_after"] = "awaiting_cancel_date"
+            return _respond_gather(CallSid, "Puedo ayudarte a cancelarla. Dime la fecha y la hora aproximada.", stats)
+
+        if route_type == "reschedule":
+            CTX.clear_flow(CallSid)
+            CTX.set_stage(CallSid, "awaiting_reschedule_date")
+            stats["branch"] = "reschedule"
+            stats["stage_after"] = "awaiting_reschedule_date"
+            return _respond_gather(CallSid, "Claro. Dime la cita actual y el dia nuevo.", stats)
 
         natural = await maybe_handle_natural_turn(CallSid, user_text, page_size=VOICE_PAGE_SIZE)
         if natural.handled:

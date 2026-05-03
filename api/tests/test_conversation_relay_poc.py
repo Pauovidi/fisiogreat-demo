@@ -50,6 +50,12 @@ def test_conversationrelay_booking_keeps_text_last_shape():
         assert "fisiogreat" in opening["token"].lower()
 
         websocket.send_json({"type": "prompt", "voicePrompt": "sesion de fisioterapia", "last": True})
+        ask_name = websocket.receive_json()
+        assert ask_name["type"] == "text"
+        assert ask_name["last"] is True
+        assert "nombre" in ask_name["token"].lower()
+
+        websocket.send_json({"type": "prompt", "voicePrompt": "Pau Marco", "last": True})
         ask_date = websocket.receive_json()
         assert ask_date["type"] == "text"
         assert ask_date["last"] is True
@@ -66,6 +72,38 @@ def test_conversationrelay_booking_keeps_text_last_shape():
         assert confirm["type"] == "text"
         assert confirm["last"] is True
         assert "perfecto" in confirm["token"].lower()
+        assert "pau" in confirm["token"].lower()
+
+
+def test_conversationrelay_calendar_failure_does_not_confirm(monkeypatch):
+    call_sid = "CA-conversationrelay-calendar-fail-1"
+    reset_state(call_sid)
+
+    monkeypatch.setattr(settings, "USE_REAL_CALENDAR", True)
+    monkeypatch.setattr(settings, "GOOGLE_CALENDAR_ID", "calendar-real")
+    monkeypatch.setattr("app.services.booking_service.calendar_service.free_busy", lambda *_args: [])
+
+    def fail_create_event(**_kwargs):
+        raise RuntimeError("calendar unavailable")
+
+    monkeypatch.setattr("app.services.booking_service.calendar_service.create_event", fail_create_event)
+
+    with client.websocket_connect("/webhook/voice/conversationrelay/ws") as websocket:
+        websocket.send_json({"type": "setup", "sessionId": "VX-calendar-fail", "callSid": call_sid})
+        websocket.receive_json()
+        websocket.send_json({"type": "prompt", "voicePrompt": "sesion de fisioterapia", "last": True})
+        websocket.receive_json()
+        websocket.send_json({"type": "prompt", "voicePrompt": "Pau Marco", "last": True})
+        websocket.receive_json()
+        websocket.send_json({"type": "prompt", "voicePrompt": "jueves", "last": True})
+        websocket.receive_json()
+        websocket.send_json({"type": "prompt", "voicePrompt": "primera", "last": True})
+        response = websocket.receive_json()
+
+    assert response["type"] == "text"
+    assert response["last"] is True
+    assert "perfecto" not in response["token"].lower()
+    assert not STORE.appointments
 
 
 def test_conversationrelay_emergency_cuts_flow():

@@ -37,6 +37,9 @@ async def maybe_handle_natural_turn(
     if route["type"] == "thanks":
         return NaturalTurnResult(True, _thanks_with_reengagement(key), "thanks")
 
+    if route["type"] == "farewell":
+        return NaturalTurnResult(True, _farewell_with_reengagement(key), "farewell")
+
     if route["type"] == "acknowledgement":
         return NaturalTurnResult(True, _acknowledgement_with_reengagement(key), "acknowledgement")
 
@@ -104,6 +107,8 @@ def _with_reengagement(key: str, answer: Optional[str], page_size: int) -> str:
         return _join_answers(answer, copy.ask_service())
     if stage == "awaiting_date":
         return _join_answers(answer, copy.resume_date(ctx.get("service")))
+    if stage == "awaiting_patient_name":
+        return _join_answers(answer, copy.ask_patient_name(ctx.get("service")))
     if stage == "offering_slots":
         current = _current_slots(key, page_size)
         if current:
@@ -118,14 +123,25 @@ def _thanks_with_reengagement(key: str) -> str:
     last_confirmed_slot = ctx.get("last_confirmed_slot")
 
     if stage in {"idle", "completed"} and last_confirmed_slot:
-        return copy.thanks_closing()
+        return copy.thanks_after_booking(last_confirmed_slot, ctx.get("last_confirmed_patient_name"))
     if stage == "awaiting_service":
         return copy.thanks_with_followup(copy.ask_service_for_booking())
+    if stage == "awaiting_patient_name":
+        return copy.thanks_with_followup(copy.ask_patient_name(ctx.get("service")))
     if stage == "awaiting_date":
         return copy.thanks_with_followup(copy.resume_date(ctx.get("service")))
     if stage == "offering_slots":
         return copy.thanks_with_followup(copy.propose_slots(_current_slots(key, 2)))
-    return copy.thanks_closing()
+    return copy.thanks_generic()
+
+
+def _farewell_with_reengagement(key: str) -> str:
+    stage = CTX.get_stage(key)
+    ctx = CTX.get(key) or {}
+    last_confirmed_slot = ctx.get("last_confirmed_slot")
+    if stage in {"idle", "completed"} and last_confirmed_slot:
+        return copy.farewell_after_booking(last_confirmed_slot, ctx.get("last_confirmed_patient_name"))
+    return copy.farewell_generic()
 
 
 def _acknowledgement_with_reengagement(key: str) -> str:
@@ -134,9 +150,11 @@ def _acknowledgement_with_reengagement(key: str) -> str:
     last_confirmed_slot = ctx.get("last_confirmed_slot")
 
     if stage in {"idle", "completed"} and last_confirmed_slot:
-        return copy.thanks_closing()
+        return copy.thanks_after_booking(last_confirmed_slot, ctx.get("last_confirmed_patient_name"))
     if stage == "awaiting_service":
         return copy.ask_service_for_booking()
+    if stage == "awaiting_patient_name":
+        return copy.ask_patient_name(ctx.get("service"))
     if stage == "awaiting_date":
         return copy.resume_date(ctx.get("service"))
     if stage == "offering_slots":

@@ -66,6 +66,16 @@ class VoiceCopy:
         return "Perfecto. Que dia te va bien?"
 
     @staticmethod
+    def ask_patient_name(service: Optional[str] = None) -> str:
+        if service:
+            return f"Perfecto, para {service}. A que nombre dejamos la cita?"
+        return "Perfecto. A que nombre dejamos la cita?"
+
+    @staticmethod
+    def thanks_name_then_date(first_name: str) -> str:
+        return f"Gracias, {first_name}. Que dia te va bien?"
+
+    @staticmethod
     def resume_date(service: Optional[str] = None) -> str:
         if service:
             return f"Para {service}, que dia te va bien?"
@@ -99,8 +109,11 @@ class VoiceCopy:
         return f"Tengo {spoken[0]}, {spoken[1]} o {spoken[2]}. Di primera, segunda o tercera."
 
     @staticmethod
-    def confirm_booking(slot: str) -> str:
-        return f"Perfecto, te apunto {VoiceCopy._slot_to_confirmation_text(slot)}."
+    def confirm_booking(slot: str, service: Optional[str] = None, patient_name: Optional[str] = None) -> str:
+        name = VoiceCopy._first_name(patient_name)
+        name_part = f", {name}" if name else ""
+        service_part = f" para {service}" if service else ""
+        return f"Perfecto{name_part}, te apunto{service_part} {VoiceCopy._slot_to_confirmation_text(slot)}."
 
     @staticmethod
     def out_of_scope() -> str:
@@ -135,8 +148,35 @@ class VoiceCopy:
         return "Gracias a ti por confiar en FisioGreat. Te esperamos."
 
     @staticmethod
+    def thanks_after_booking(slot: str, patient_name: Optional[str] = None) -> str:
+        name = VoiceCopy._first_name(patient_name)
+        name_part = f", {name}" if name else ""
+        return f"Gracias a ti{name_part}. Te esperamos {VoiceCopy._slot_to_confirmation_text(slot)}."
+
+    @staticmethod
+    def thanks_generic() -> str:
+        return "Gracias a ti. Si necesitas pedir, cambiar o cancelar una cita, aqui estoy."
+
+    @staticmethod
+    def farewell_after_booking(slot: str, patient_name: Optional[str] = None) -> str:
+        name = VoiceCopy._first_name(patient_name)
+        name_part = f", {name}" if name else ""
+        return f"Hasta luego{name_part}. Nos vemos {VoiceCopy._slot_to_confirmation_text(slot)}."
+
+    @staticmethod
+    def farewell_generic() -> str:
+        return "Hasta luego. Aqui estoy si necesitas ayuda con tus citas."
+
+    @staticmethod
     def thanks_with_followup(follow_up: str) -> str:
         return f"Gracias a ti. {follow_up}".strip()
+
+    @staticmethod
+    def _first_name(patient_name: Optional[str]) -> Optional[str]:
+        if not patient_name:
+            return None
+        stripped = patient_name.strip()
+        return stripped.split()[0] if stripped else None
 
     @staticmethod
     def _slot_to_voice_text(slot: str, *, include_day: bool, include_prefix: bool) -> str:

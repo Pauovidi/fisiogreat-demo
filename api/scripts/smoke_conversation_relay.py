@@ -24,6 +24,7 @@ def main():
         steps = [
             {"type": "setup", "sessionId": "VX-smoke-fisiogreat-1", "callSid": call_sid},
             {"type": "prompt", "voicePrompt": "valoracion inicial", "last": True},
+            {"type": "prompt", "voicePrompt": "Pau Marco", "last": True},
             {"type": "prompt", "voicePrompt": "jueves", "last": True},
             {"type": "prompt", "voicePrompt": "segunda", "last": True},
         ]
