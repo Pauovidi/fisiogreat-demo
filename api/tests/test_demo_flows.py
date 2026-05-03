@@ -22,8 +22,11 @@ def reset_state(*keys: str):
         CTX.clear(key)
 
 
-def post_whatsapp(user: str, body: str):
-    response = client.post("/webhook/whatsapp", data={"From": f"whatsapp:{user}", "Body": body})
+def post_whatsapp(user: str, body: str, profile_name: str = ""):
+    response = client.post(
+        "/webhook/whatsapp",
+        data={"From": f"whatsapp:{user}", "Body": body, "ProfileName": profile_name},
+    )
     assert response.status_code == 200
     parse_xml(response.text)
     return response
@@ -49,7 +52,8 @@ def test_whatsapp_creates_reschedules_and_cancels_fisiogreat_appointment():
     reset_state(user)
 
     assert "fisio" in post_whatsapp(user, "hola").text.lower()
-    assert "día" in post_whatsapp(user, "sesión de fisioterapia").text.lower()
+    assert "nombre" in post_whatsapp(user, "sesión de fisioterapia").text.lower()
+    assert "día" in post_whatsapp(user, "Pau Marco").text.lower()
     offered = post_whatsapp(user, "jueves")
     assert "te puedo ofrecer" in offered.text.lower()
     confirmed = post_whatsapp(user, "1")

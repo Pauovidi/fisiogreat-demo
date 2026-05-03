@@ -1,4 +1,5 @@
 import datetime as dt
+import re
 import urllib.parse as up
 from typing import List, Optional
 
@@ -67,6 +68,12 @@ def _format_slot_label(slot_dt: dt.datetime) -> str:
     return f"{WEEKDAY_LABELS[slot_dt.weekday()]} {slot_dt.strftime('%d/%m')} a las {slot_dt.strftime('%H:%M')}"
 
 
+def _first_name(patient_name: Optional[str]) -> Optional[str]:
+    if not patient_name:
+        return None
+    return patient_name.strip().split()[0] if patient_name.strip() else None
+
+
 def _dummy_slot_labels(date_pref: dt.date, time_pref: Optional[str], count: int) -> List[str]:
     if time_pref == "morning":
         times = [dt.time(10, 0), dt.time(11, 30), dt.time(13, 0)]
@@ -133,6 +140,8 @@ def _faq_with_reengagement(key: str, faq_id: str = "hours") -> str:
         return answer
     if stage == "awaiting_date":
         return f"{answer}\n\n{copy.ask_date(ctx.get('service'))}"
+    if stage == "awaiting_patient_name":
+        return f"{answer}\n\n{copy.ask_patient_name(ctx.get('service'))}"
     if stage == "offering_slots":
         current = _current_slots(key)
         if current:
@@ -159,7 +168,7 @@ RESET_COMMANDS = {
     "olvida lo anterior",
 }
 
-PENDING_FLOW_STAGES = {"awaiting_service", "awaiting_date", "offering_slots", "awaiting_reschedule_date"}
+PENDING_FLOW_STAGES = {"awaiting_service", "awaiting_patient_name", "awaiting_date", "offering_slots", "awaiting_reschedule_date"}
 
 
 def _is_reset_command(body: str) -> bool:
@@ -172,6 +181,7 @@ def _is_pending_flow_cancel(body: str, stage: str) -> bool:
 
 async def _clear_conversation_flow(key: str, *, reason: str) -> None:
     CTX.clear_flow(key)
+    CTX.set_last_confirmed_slot(key, None)
     try:
         await supabase_repo.update_conversation_session(
             key,
@@ -184,6 +194,89 @@ async def _clear_conversation_flow(key: str, *, reason: str) -> None:
         logger.warning("WA reset session update failed for %s: %r", key, exc)
 
 
+def _is_generic_profile_name(profile_name: str) -> bool:
+    normalized = normalize_text(profile_name)
+    return not normalized or normalized in {"whatsapp", "usuario", "user", "cliente", "fisio", "fisiogreat"}
+
+
+def _parse_patient_name(body: str) -> Optional[str]:
+    normalized = normalize_text(body)
+    if not normalized:
+        return None
+    if parse_spanish_day(body) or detect_service(body):
+        return None
+    route = route_message(body)
+    if route["type"] in {
+        "faq",
+        "cancel",
+        "reschedule",
+        "booking",
+        "more_options",
+        "thanks",
+        "acknowledgement",
+        "farewell",
+        "out_of_scope",
+        "greeting",
+        "pick_slot",
+    }:
+        return None
+
+    cleaned = body.strip()
+    patterns = [
+        r"^\s*me llamo\s+(.+)$",
+        r"^\s*soy\s+(.+)$",
+        r"^\s*a nombre de\s+(.+)$",
+    ]
+    for pattern in patterns:
+        match = re.match(pattern, cleaned, flags=re.IGNORECASE)
+        if match:
+            cleaned = match.group(1).strip()
+            break
+
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    if not re.fullmatch(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ' -]{2,60}", cleaned):
+        return None
+    return " ".join(part.capitalize() for part in cleaned.split())
+
+
+async def _resolve_patient_name(key: str, *, profile_name: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    profile_candidate = None if not profile_name or _is_generic_profile_name(profile_name) else _parse_patient_name(profile_name)
+    patient = await supabase_repo.get_or_create_patient(
+        clinic_id=settings.DEMO_CLINIC_ID,
+        phone=key,
+        name=profile_candidate,
+    )
+    if patient.get("name"):
+        source = "profile" if profile_candidate and patient["name"] == profile_candidate else "supabase"
+        CTX.set_patient_name(key, patient["name"], source)
+        logger.info("patient_name_collected=true patient_name_source=%s", source)
+        return patient["name"], source
+    logger.info("patient_name_collected=false patient_name_source=missing")
+    return None, None
+
+
+async def _store_manual_patient_name(key: str, patient_name: str) -> None:
+    CTX.set_patient_name(key, patient_name, "manual")
+    try:
+        await supabase_repo.get_or_create_patient(
+            clinic_id=settings.DEMO_CLINIC_ID,
+            phone=key,
+            name=patient_name,
+        )
+    except Exception as exc:
+        logger.warning("patient_name_store_failed phone_present=%s error=%r", bool(key), exc)
+    logger.info("patient_name_collected=true patient_name_source=manual")
+
+
+def _recent_booking_reply(key: str, *, farewell: bool = False) -> str:
+    ctx = CTX.get(key) or {}
+    slot = ctx.get("last_confirmed_slot")
+    patient_name = ctx.get("last_confirmed_patient_name")
+    if slot:
+        return copy.farewell_after_booking(slot, patient_name) if farewell else copy.thanks_after_booking(slot, patient_name)
+    return copy.farewell_generic() if farewell else copy.thanks_generic()
+
+
 @router.post("/whatsapp")
 async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
     del db
@@ -191,6 +284,7 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
         params = up.parse_qs((await request.body()).decode())
         body = (params.get("Body", [""])[0] or "").strip()
         wa_from = _normalize_key(params.get("From", [""])[0])
+        profile_name = (params.get("ProfileName", [""])[0] or "").strip()
         logger.info(f"WA from {wa_from}: {body}")
 
         current_stage = CTX.get_stage(wa_from)
@@ -218,16 +312,34 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
             await _clear_conversation_flow(wa_from, reason="pending_flow_cancel")
             return _twiml(copy.cancel_pending_flow())
 
+        route_early = route_message(body)
+        if route_early["type"] == "thanks":
+            return _twiml(_recent_booking_reply(wa_from))
+        if route_early["type"] == "farewell":
+            return _twiml(_recent_booking_reply(wa_from, farewell=True))
+
         if current_stage == "awaiting_service":
             service = detect_service(body)
             if service:
                 CTX.set_service(wa_from, service)
-                CTX.set_stage(wa_from, "awaiting_date")
-                return _twiml(copy.ask_date(service))
+                patient_name, _source = await _resolve_patient_name(wa_from, profile_name=profile_name)
+                if patient_name:
+                    CTX.set_stage(wa_from, "awaiting_date")
+                    return _twiml(copy.ask_date(service))
+                CTX.set_stage(wa_from, "awaiting_patient_name")
+                return _twiml(copy.ask_patient_name(service))
 
             route_peek = route_message(body)
             if not _is_state_interrupt(route_peek["type"]):
                 return _twiml(copy.ask_service_retry())
+
+        elif current_stage == "awaiting_patient_name":
+            patient_name = _parse_patient_name(body)
+            if not patient_name:
+                return _twiml("No he entendido bien el nombre. ¿A qué nombre dejamos la cita?")
+            await _store_manual_patient_name(wa_from, patient_name)
+            CTX.set_stage(wa_from, "awaiting_date")
+            return _twiml(copy.thanks_name_then_date(_first_name(patient_name) or patient_name))
 
         elif current_stage == "awaiting_date":
             parsed_date = parse_spanish_day(body)
@@ -270,6 +382,7 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
                     external_user_id=wa_from,
                     service_type=service,
                     start_at=selected_dt,
+                    patient_name=ctx.get("patient_name"),
                     metadata={"slot_label": selected},
                 )
                 if not booking_result.ok:
@@ -281,8 +394,15 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
                         settings.USE_REAL_CALENDAR,
                     )
                     return _twiml("No he podido confirmar ese hueco ahora mismo. Dime otro día y lo reviso.")
+                patient_name = (booking_result.appointment or {}).get("metadata", {}).get("patient_name") or ctx.get("patient_name")
                 CTX.clear_flow(wa_from)
-                return _twiml(copy.confirm_booking(selected))
+                CTX.set_last_confirmed_slot(
+                    wa_from,
+                    selected,
+                    service=service,
+                    patient_name=patient_name,
+                )
+                return _twiml(copy.confirm_booking(selected, service, patient_name))
 
             route_peek = route_message(body)
             if route_peek["type"] == "more_options":
@@ -298,8 +418,12 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
             appointment_id = _latest_appointment_id(wa_from)
             CTX.clear_flow(wa_from)
             if appointment_id:
+                appointment = supabase_repo.STORE.appointments.get(appointment_id) or {}
+                patient_name = (appointment.get("metadata") or {}).get("patient_name")
                 await cancel_appointment(appointment_id)
-                return _twiml("Listo, he dejado la cita cancelada.")
+                first = _first_name(patient_name)
+                prefix = f"Listo, {first}, " if first else "Listo, "
+                return _twiml(f"{prefix}he dejado la cita cancelada.")
             return _twiml("No encuentro una cita activa para cancelar desde este chat. Te paso con el equipo.")
 
         elif current_stage == "awaiting_reschedule_date":
@@ -313,7 +437,10 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
                     new_end_at=new_start + dt.timedelta(minutes=45),
                 )
                 CTX.clear_flow(wa_from)
-                return _twiml("Listo, he cambiado la cita. Te queda confirmada para el nuevo día a las 10:00.")
+                appointment = supabase_repo.STORE.appointments.get(appointment_id) or {}
+                first = _first_name((appointment.get("metadata") or {}).get("patient_name"))
+                prefix = f"Listo, {first}, " if first else "Listo, "
+                return _twiml(f"{prefix}he cambiado la cita. Te queda confirmada para el nuevo día a las 10:00.")
             return _twiml("Dime el nuevo día, por ejemplo mañana o jueves.")
 
         route = route_message(body)
@@ -328,8 +455,12 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
             service = route.get("service")
             if service:
                 CTX.set_service(wa_from, service)
-                CTX.set_stage(wa_from, "awaiting_date")
-                return _twiml(copy.ask_date(service))
+                patient_name, _source = await _resolve_patient_name(wa_from, profile_name=profile_name)
+                if patient_name:
+                    CTX.set_stage(wa_from, "awaiting_date")
+                    return _twiml(copy.ask_date(service))
+                CTX.set_stage(wa_from, "awaiting_patient_name")
+                return _twiml(copy.ask_patient_name(service))
             CTX.set_stage(wa_from, "awaiting_service")
             return _twiml(copy.ask_service())
 

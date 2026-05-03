@@ -29,6 +29,16 @@ class WhatsAppCopy:
         return f"Perfecto{service_text}. ¿Qué día te viene bien?"
 
     @staticmethod
+    def ask_patient_name(service: Optional[str] = None) -> str:
+        if service:
+            return f"Perfecto para {service}. ¿A qué nombre dejamos la cita?"
+        return "Perfecto. ¿A qué nombre dejamos la cita?"
+
+    @staticmethod
+    def thanks_name_then_date(first_name: str) -> str:
+        return f"Gracias, {first_name}. ¿Qué día te viene bien?"
+
+    @staticmethod
     def ask_date_retry() -> str:
         return "Dime un día que te venga bien, por ejemplo jueves o mañana."
 
@@ -43,8 +53,31 @@ class WhatsAppCopy:
         return "\n".join(lines)
 
     @staticmethod
-    def confirm_booking(slot: str) -> str:
-        return f"Perfecto, te dejo apuntada la cita para {slot}."
+    def confirm_booking(slot: str, service: Optional[str] = None, patient_name: Optional[str] = None) -> str:
+        first_name = _first_name(patient_name)
+        prefix = f"Perfecto, {first_name}. " if first_name else "Perfecto. "
+        service_text = f" para {service}" if service else ""
+        return f"{prefix}Te dejo apuntada la cita{service_text} el {slot}."
+
+    @staticmethod
+    def thanks_after_booking(slot: str, patient_name: Optional[str] = None) -> str:
+        first_name = _first_name(patient_name)
+        prefix = f"Gracias a ti, {first_name}. " if first_name else "Gracias a ti. "
+        return f"{prefix}Te esperamos el {slot}."
+
+    @staticmethod
+    def thanks_generic() -> str:
+        return "Gracias a ti. Si necesitas pedir, cambiar o cancelar una cita, aquí estoy."
+
+    @staticmethod
+    def farewell_after_booking(slot: str, patient_name: Optional[str] = None) -> str:
+        first_name = _first_name(patient_name)
+        prefix = f"Hasta luego, {first_name}. " if first_name else "Hasta luego. "
+        return f"{prefix}Nos vemos el {slot}."
+
+    @staticmethod
+    def farewell_generic() -> str:
+        return "Hasta luego. Aquí estoy si necesitas ayuda con tus citas."
 
     @staticmethod
     def main_menu_soft() -> str:
@@ -74,3 +107,9 @@ class WhatsAppCopy:
 
 
 WA_COPY = WhatsAppCopy()
+
+
+def _first_name(patient_name: Optional[str]) -> Optional[str]:
+    if not patient_name:
+        return None
+    return patient_name.strip().split()[0] if patient_name.strip() else None

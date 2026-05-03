@@ -93,6 +93,9 @@ def route_message(text: str) -> Dict[str, Any]:
     if _matches_acknowledgement(normalized):
         return {"type": "acknowledgement"}
 
+    if _matches_farewell(normalized):
+        return {"type": "farewell"}
+
     if _matches_hours(normalized):
         return {"type": "faq", "faq_id": "hours"}
 
@@ -305,4 +308,14 @@ def _matches_acknowledgement(normalized: str) -> bool:
         "genial",
         "de acuerdo",
         "bien",
+    }
+
+
+def _matches_farewell(normalized: str) -> bool:
+    return normalized in {
+        "adios",
+        "hasta luego",
+        "nos vemos",
+        "chao",
+        "bye",
     }

@@ -15,9 +15,13 @@ class MiniContext:
             "service": None,
             "date_pref": None,
             "time_pref": None,
+            "patient_name": None,
+            "patient_name_source": None,
             "offered_slots": [],
             "offered_offset": 0,
             "last_confirmed_slot": None,
+            "last_confirmed_service": None,
+            "last_confirmed_patient_name": None,
             "last_confirmed_at": None,
         }
 
@@ -62,14 +66,28 @@ class MiniContext:
         entry = self._touch(key)
         entry["time_pref"] = time_pref
 
+    def set_patient_name(self, key: str, patient_name: Optional[str], source: Optional[str] = None):
+        entry = self._touch(key)
+        entry["patient_name"] = patient_name
+        entry["patient_name_source"] = source
+
     def set_slots(self, key: str, slots: List[str]):
         entry = self._touch(key)
         entry["offered_slots"] = list(slots)
         entry["offered_offset"] = 0
 
-    def set_last_confirmed_slot(self, key: str, slot: Optional[str]):
+    def set_last_confirmed_slot(
+        self,
+        key: str,
+        slot: Optional[str],
+        *,
+        service: Optional[str] = None,
+        patient_name: Optional[str] = None,
+    ):
         entry = self._touch(key)
         entry["last_confirmed_slot"] = slot
+        entry["last_confirmed_service"] = service if slot else None
+        entry["last_confirmed_patient_name"] = patient_name if slot else None
         entry["last_confirmed_at"] = time.time() if slot else None
 
     def next_slots(self, key: str, n: int = 3) -> List[str]:
@@ -86,6 +104,8 @@ class MiniContext:
         previous = self.get(key) or {}
         entry = self._fresh_entry()
         entry["last_confirmed_slot"] = previous.get("last_confirmed_slot")
+        entry["last_confirmed_service"] = previous.get("last_confirmed_service")
+        entry["last_confirmed_patient_name"] = previous.get("last_confirmed_patient_name")
         entry["last_confirmed_at"] = previous.get("last_confirmed_at")
         self._store[key] = entry
 

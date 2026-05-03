@@ -118,13 +118,22 @@ async def confirm_slot(
             start_at.isoformat(),
             end_at.isoformat(),
         )
+        event_summary = f"{settings.CLINIC_NAME} - {service_type}"
+        if patient.get("name"):
+            event_summary = f"{event_summary} - {patient['name']}"
+        event_description = (
+            f"Paciente: {patient.get('name') or 'No indicado'}\n"
+            f"Canal: {channel}\n"
+            f"Teléfono: {external_user_id}\n"
+            f"Servicio: {service_type}"
+        )
         calendar_event_id = calendar_service.create_event(
             event_id=event_id,
-            summary=f"{settings.CLINIC_NAME} - {service_type}",
+            summary=event_summary,
             start_at=start_at,
             end_at=end_at,
-            description=f"Cita creada por {channel} para {external_user_id}",
-            metadata={"channel": channel, "clinic_id": clinic_id},
+            description=event_description,
+            metadata={"channel": channel, "clinic_id": clinic_id, "patient_name_present": bool(patient.get("name"))},
         )
         logger.info(
             "calendar_create_success use_real_calendar=%s calendar_event_id=%s",
@@ -142,13 +151,14 @@ async def confirm_slot(
             calendar_event_id=calendar_event_id,
             channel=channel,
             external_user_id=external_user_id,
-            metadata=metadata or {},
+            metadata={**(metadata or {}), "patient_name": patient.get("name")},
         )
         logger.info(
-            "booking_confirm_success use_real_calendar=%s calendar_event_id=%s appointment_id=%s",
+            "booking_confirm_success use_real_calendar=%s calendar_event_id=%s appointment_id=%s appointment_confirmed_with_patient_name=%s",
             settings.USE_REAL_CALENDAR,
             calendar_event_id,
             appointment.get("id"),
+            bool(patient.get("name")),
         )
         return BookingResult(True, appointment=appointment)
     except Exception as exc:

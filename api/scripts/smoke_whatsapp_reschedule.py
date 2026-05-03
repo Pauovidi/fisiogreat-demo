@@ -13,7 +13,7 @@ def main():
     client = TestClient(app)
     user = "+34600999002"
     CTX.clear(user)
-    for body in ["hola", "valoracion inicial", "jueves", "1", "quiero cambiar la cita", "viernes"]:
+    for body in ["hola", "valoracion inicial", "Pau Marco", "jueves", "1", "quiero cambiar la cita", "viernes"]:
         response = client.post("/webhook/whatsapp", data={"From": f"whatsapp:{user}", "Body": body})
         print(f"\nSENT: {body}")
         print(f"STATUS: {response.status_code}")
