@@ -165,6 +165,13 @@ RESET_COMMANDS = {
     "olvida lo anterior",
 }
 
+DEMO_NAME_CLEAR_COMMANDS = {
+    "olvida mi nombre",
+    "borrar mi nombre",
+    "borrar mis datos",
+    "reiniciar demo",
+}
+
 PENDING_FLOW_STAGES = {
     "awaiting_service",
     "awaiting_consultation_reason",
@@ -177,6 +184,10 @@ PENDING_FLOW_STAGES = {
 
 def _is_reset_command(body: str) -> bool:
     return normalize_text(body) in RESET_COMMANDS
+
+
+def _is_demo_name_clear_command(body: str) -> bool:
+    return normalize_text(body) in DEMO_NAME_CLEAR_COMMANDS
 
 
 def _is_pending_flow_cancel(body: str, stage: str) -> bool:
@@ -196,6 +207,28 @@ async def _clear_conversation_flow(key: str, *, reason: str) -> None:
         )
     except Exception as exc:
         logger.warning("WA reset session update failed for %s: %r", key, exc)
+
+
+async def _clear_demo_patient_name(key: str) -> None:
+    CTX.clear_flow(key)
+    CTX.set_last_confirmed_slot(key, None)
+    try:
+        await supabase_repo.clear_patient_name_by_phone(
+            clinic_id=settings.DEMO_CLINIC_ID,
+            phone=key,
+        )
+    except Exception as exc:
+        logger.warning("WA demo patient name clear failed for %s: %r", key, exc)
+    try:
+        await supabase_repo.update_conversation_session(
+            key,
+            channel="whatsapp",
+            external_user_id=key,
+            stage="idle",
+            reset_reason="demo_name_clear",
+        )
+    except Exception as exc:
+        logger.warning("WA demo name clear session update failed for %s: %r", key, exc)
 
 
 def _is_reliable_patient_name(ctx: dict) -> bool:
@@ -298,6 +331,10 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
         if _is_reset_command(body):
             await _clear_conversation_flow(wa_from, reason="reset_command")
             return _twiml(copy.reset_done())
+
+        if _is_demo_name_clear_command(body):
+            await _clear_demo_patient_name(wa_from)
+            return _twiml(copy.demo_name_cleared())
 
         if _is_pending_flow_cancel(body, current_stage):
             await _clear_conversation_flow(wa_from, reason="pending_flow_cancel")

@@ -3,6 +3,7 @@ import asyncio
 from test_demo_flows import post_whatsapp, reset_state
 from app.config.settings import settings
 from app.services import supabase_repo
+from app.services.calendar_service import CALENDAR_STORE
 from app.services.supabase_repo import STORE
 from app.utils.mini_context import CTX
 
@@ -494,6 +495,79 @@ def test_whatsapp_reset_clears_state_and_slots():
     assert CTX.get_stage(user) == "idle"
     assert CTX.get(user)["offered_slots"] == []
     assert CTX.get(user)["consultation_reason"] is None
+
+
+def test_whatsapp_reiniciar_keeps_saved_patient_name():
+    user = "+34600000034"
+    reset_state(user)
+
+    post_whatsapp(user, "quiero valoración inicial")
+    post_whatsapp(user, "Pau Marco")
+    patient = next(iter(STORE.patients.values()))
+    assert patient["name"] == "Pau Marco"
+
+    response = post_whatsapp(user, "reiniciar")
+
+    assert "empezamos de nuevo" in response.text.lower()
+    assert patient["name"] == "Pau Marco"
+    assert CTX.get_stage(user) == "idle"
+
+
+def test_whatsapp_olvida_mi_nombre_clears_patient_name_only():
+    user = "+34600000035"
+    reset_state(user)
+
+    post_whatsapp(user, "quiero valoración inicial")
+    post_whatsapp(user, "Pau Marco")
+    post_whatsapp(user, "jueves")
+    post_whatsapp(user, "1")
+    appointment = next(iter(STORE.appointments.values()))
+    calendar_event_id = appointment["calendar_event_id"]
+    assert calendar_event_id in CALENDAR_STORE.events
+    patient = next(iter(STORE.patients.values()))
+    assert patient["name"] == "Pau Marco"
+
+    response = post_whatsapp(user, "olvida mi nombre")
+
+    assert "he limpiado el nombre guardado" in response.text.lower()
+    assert patient["name"] is None
+    assert len(STORE.appointments) == 1
+    assert appointment["calendar_event_id"] == calendar_event_id
+    assert calendar_event_id in CALENDAR_STORE.events
+
+
+def test_whatsapp_after_olvida_mi_nombre_asks_name_again():
+    user = "+34600000036"
+    reset_state(user)
+
+    post_whatsapp(user, "quiero valoración inicial")
+    post_whatsapp(user, "Pau Marco")
+    post_whatsapp(user, "olvida mi nombre")
+    response = post_whatsapp(user, "quiero valoración inicial")
+
+    assert "nombre" in response.text.lower()
+    assert CTX.get_stage(user) == "awaiting_patient_name"
+
+
+def test_whatsapp_demo_name_clear_command_variants():
+    commands = ["borrar mi nombre", "borrar mis datos", "reiniciar demo"]
+    for index, command in enumerate(commands, start=1):
+        user = f"+3460000004{index}"
+        reset_state(user)
+        asyncio.run(
+            supabase_repo.create_patient(
+                clinic_id=settings.DEMO_CLINIC_ID,
+                phone=user,
+                name="Pau Marco",
+            )
+        )
+
+        response = post_whatsapp(user, command)
+        patient = next(item for item in STORE.patients.values() if item["phone"] == user)
+
+        assert response.text.count("he limpiado el nombre guardado") == 1
+        assert patient["name"] is None
+        assert not STORE.appointments
 
 
 def test_whatsapp_reset_prevents_old_slot_selection():

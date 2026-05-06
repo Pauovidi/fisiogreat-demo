@@ -122,6 +122,13 @@ class WhatsAppCopy:
         )
 
     @staticmethod
+    def demo_name_cleared() -> str:
+        return (
+            "Perfecto, he limpiado el nombre guardado para esta demo. "
+            "Empezamos de nuevo. ¿En qué puedo ayudarte?"
+        )
+
+    @staticmethod
     def cancel_pending_flow() -> str:
         return "De acuerdo, cancelo esta gestión y empezamos de nuevo. ¿En qué puedo ayudarte?"
 

@@ -145,6 +145,28 @@ async def upsert_patient_by_phone(*, clinic_id: str, phone: str, name: Optional[
     return await get_or_create_patient(clinic_id=clinic_id, phone=phone, name=name)
 
 
+async def clear_patient_name_by_phone(*, clinic_id: str, phone: str) -> Optional[Dict[str, Any]]:
+    for patient in STORE.patients.values():
+        if patient.get("clinic_id") == clinic_id and patient.get("phone") == phone:
+            patient["name"] = None
+            patient["updated_at"] = _now()
+            logger.info("supabase_patient_name_cleared patient_id=%s source=memory", patient.get("id"))
+            return patient
+
+    if supabase_configured():
+        filters = {"clinic_id": f"eq.{clinic_id}", "phone": f"eq.{phone}"}
+        existing = await _select("patients", filters)
+        if not existing:
+            logger.info("supabase_patient_name_clear_skipped reason=not_found phone_present=%s", bool(phone))
+            return None
+        patient = await _patch("patients", existing[0]["id"], {"name": None, "updated_at": _now()})
+        logger.info("supabase_patient_name_cleared patient_id=%s source=supabase", patient.get("id"))
+        return patient
+
+    logger.info("supabase_patient_name_clear_skipped reason=not_found phone_present=%s", bool(phone))
+    return None
+
+
 async def create_appointment(**payload: Any) -> Dict[str, Any]:
     payload.setdefault("id", str(uuid.uuid4()))
     payload.setdefault("created_at", _now())
