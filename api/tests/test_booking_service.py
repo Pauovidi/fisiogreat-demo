@@ -106,6 +106,62 @@ def test_confirm_slot_without_patient_name_does_not_create_calendar_or_appointme
     assert all(lock["status"] == "released" for lock in STORE.locks.values())
 
 
+def test_voice_confirm_slot_requires_contact_before_calendar(monkeypatch):
+    STORE.reset()
+    CALENDAR_STORE.reset()
+    start = dt.datetime(2026, 5, 4, 10, 0)
+    create_event_calls = []
+
+    monkeypatch.setattr("app.services.booking_service.calendar_service.create_event", lambda **kwargs: create_event_calls.append(kwargs))
+
+    result = asyncio.run(confirm_slot(
+        channel="voice",
+        external_user_id="CA-voice-missing-contact",
+        service_type="sesion de fisioterapia",
+        start_at=start,
+        patient_name="Pau Marco",
+        consultation_reason="me duele la rodilla",
+    ))
+
+    assert not result.ok
+    assert result.reason == "missing_contact"
+    assert create_event_calls == []
+    assert not STORE.appointments
+
+
+def test_confirm_slot_metadata_and_calendar_description_include_reason_and_contact(monkeypatch):
+    STORE.reset()
+    CALENDAR_STORE.reset()
+    start = dt.datetime(2026, 5, 4, 10, 0)
+    calls = []
+
+    monkeypatch.setattr("app.services.booking_service.calendar_service.free_busy", lambda *_args: [])
+
+    def fake_create_event(**kwargs):
+        calls.append(kwargs)
+        return "event-with-reason-contact"
+
+    monkeypatch.setattr("app.services.booking_service.calendar_service.create_event", fake_create_event)
+
+    result = asyncio.run(confirm_slot(
+        channel="voice",
+        external_user_id="CA-voice-contact",
+        service_type="sesion de fisioterapia",
+        start_at=start,
+        patient_name="Pau Marco",
+        consultation_reason="me duele la rodilla",
+        contact_email="pau@example.com",
+    ))
+
+    assert result.ok
+    description = calls[0]["description"]
+    assert "Motivo de consulta: me duele la rodilla" in description
+    assert "Contacto para recordatorio: email pau@example.com" in description
+    assert result.appointment["metadata"]["consultation_reason"] == "me duele la rodilla"
+    assert result.appointment["metadata"]["contact_email"] == "pau@example.com"
+    assert result.appointment["metadata"]["channel"] == "voice"
+
+
 def test_real_calendar_failure_does_not_create_confirmed_appointment(monkeypatch):
     STORE.reset()
     CALENDAR_STORE.reset()

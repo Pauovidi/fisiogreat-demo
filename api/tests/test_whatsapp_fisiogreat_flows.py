@@ -27,9 +27,12 @@ def test_whatsapp_new_booking_asks_patient_name_before_date():
 
     post_whatsapp(user, "quiero pedir una cita")
     service = post_whatsapp(user, "sesión de fisio")
+    reason = post_whatsapp(user, "me duele la rodilla")
     name = post_whatsapp(user, "Pau Marco")
 
-    assert "nombre" in service.text.lower()
+    assert "motivo" in service.text.lower()
+    assert "nombre" in reason.text.lower()
+    assert CTX.get(user)["consultation_reason"] == "me duele la rodilla"
     assert "gracias, pau" in name.text.lower()
     assert "qué día" in name.text.lower()
     assert CTX.get(user)["patient_name"] == "Pau Marco"
@@ -41,6 +44,7 @@ def test_whatsapp_me_llamo_updates_patient_name():
 
     post_whatsapp(user, "quiero cita")
     post_whatsapp(user, "fisioterapia")
+    post_whatsapp(user, "me duele la rodilla")
     response = post_whatsapp(user, "me llamo Pau")
 
     assert "gracias, pau" in response.text.lower()
@@ -61,9 +65,11 @@ def test_whatsapp_existing_named_patient_skips_name_prompt():
 
     post_whatsapp(user, "quiero cita")
     response = post_whatsapp(user, "fisioterapia")
+    after_reason = post_whatsapp(user, "sobrecarga lumbar")
 
-    assert "qué día" in response.text.lower()
-    assert "nombre" not in response.text.lower()
+    assert "motivo" in response.text.lower()
+    assert "qué día" in after_reason.text.lower()
+    assert "nombre" not in after_reason.text.lower()
     assert CTX.get(user)["patient_name"] == "Ana Marco"
 
 
@@ -73,19 +79,21 @@ def test_whatsapp_profile_name_does_not_skip_patient_name_prompt():
 
     post_whatsapp(user, "quiero cita", profile_name="Pau Marco")
     response = post_whatsapp(user, "fisioterapia", profile_name="Pau Marco")
+    after_reason = post_whatsapp(user, "contractura cervical", profile_name="Pau Marco")
 
-    assert "nombre" in response.text.lower()
+    assert "motivo" in response.text.lower()
+    assert "nombre" in after_reason.text.lower()
     assert not CTX.get(user).get("patient_name")
 
 
-def test_whatsapp_necesito_sesion_fisio_without_patient_name_asks_name():
+def test_whatsapp_necesito_sesion_fisio_asks_reason_before_name():
     user = "+34600000029"
     reset_state(user)
 
     response = post_whatsapp(user, "necesito una sesión de fisio")
 
-    assert "nombre" in response.text.lower()
-    assert CTX.get_stage(user) == "awaiting_patient_name"
+    assert "motivo" in response.text.lower()
+    assert CTX.get_stage(user) == "awaiting_consultation_reason"
     assert CTX.get(user)["service"] == "sesion de fisioterapia"
 
 
@@ -94,6 +102,7 @@ def test_whatsapp_date_before_patient_name_does_not_offer_slots():
     reset_state(user)
 
     post_whatsapp(user, "quiero sesión de fisio")
+    post_whatsapp(user, "me duele la rodilla")
     response = post_whatsapp(user, "el miércoles que viene")
 
     assert "antes de buscar huecos" in response.text.lower()
@@ -106,10 +115,35 @@ def test_whatsapp_slot_number_before_patient_name_does_not_confirm():
     reset_state(user)
 
     post_whatsapp(user, "quiero sesión de fisio")
+    post_whatsapp(user, "me duele la rodilla")
     response = post_whatsapp(user, "2")
 
     assert "antes de confirmar" in response.text.lower()
     assert CTX.get_stage(user) == "awaiting_patient_name"
+    assert not STORE.appointments
+
+
+def test_whatsapp_ambiguous_consultation_reason_reprompts():
+    user = "+34600000032"
+    reset_state(user)
+
+    post_whatsapp(user, "quiero sesión de fisio")
+    response = post_whatsapp(user, "no se")
+
+    assert "motivo de la consulta" in response.text.lower()
+    assert CTX.get_stage(user) == "awaiting_consultation_reason"
+    assert CTX.get(user)["consultation_reason"] is None
+
+
+def test_whatsapp_emergency_during_consultation_reason_cuts_flow():
+    user = "+34600000033"
+    reset_state(user)
+
+    post_whatsapp(user, "quiero sesión de fisio")
+    response = post_whatsapp(user, "dolor torácico")
+
+    assert "112" in response.text
+    assert CTX.get_stage(user) == "emergency_detected"
     assert not STORE.appointments
 
 
@@ -130,7 +164,8 @@ def test_whatsapp_second_option_confirms_only_after_calendar_ok(monkeypatch):
     monkeypatch.setattr("app.services.booking_service.calendar_service.create_event", fake_create_event)
 
     post_whatsapp(user, "quiero cita")
-    assert "nombre" in post_whatsapp(user, "fisioterapia").text.lower()
+    assert "motivo" in post_whatsapp(user, "fisioterapia").text.lower()
+    assert "nombre" in post_whatsapp(user, "me duele la rodilla").text.lower()
     assert "día" in post_whatsapp(user, "Pau Marco").text.lower()
     assert "te puedo ofrecer" in post_whatsapp(user, "mañana").text.lower()
     response = post_whatsapp(user, "2")
@@ -139,11 +174,14 @@ def test_whatsapp_second_option_confirms_only_after_calendar_ok(monkeypatch):
     assert calls and calls[0][0] == "calendar"
     assert "Pau Marco" in calls[0][1]["summary"]
     assert "Paciente: Pau Marco" in calls[0][1]["description"]
+    assert "Motivo de consulta: me duele la rodilla" in calls[0][1]["description"]
     appointment = next(iter(STORE.appointments.values()))
     assert appointment["status"] == "confirmed"
     assert appointment["calendar_event_id"] == "wa-real-event-2"
     assert appointment["metadata"]["slot_label"].startswith("2.") is False
     assert appointment["metadata"]["patient_name"] == "Pau Marco"
+    assert appointment["metadata"]["consultation_reason"] == "me duele la rodilla"
+    assert appointment["metadata"]["contact_phone"] == user
     assert "perfecto, pau" in response.text.lower()
     assert "sesion de fisioterapia" in response.text.lower()
 
@@ -159,6 +197,7 @@ def test_whatsapp_accepts_natural_second_option_text(monkeypatch):
 
     post_whatsapp(user, "quiero pedir una cita")
     post_whatsapp(user, "sesion de fisio")
+    post_whatsapp(user, "me duele la rodilla")
     post_whatsapp(user, "Pau Marco")
     post_whatsapp(user, "mañana mismo")
     offered = CTX.get(user)["offered_slots"]
@@ -181,6 +220,7 @@ def test_whatsapp_accepts_natural_third_option_text(monkeypatch):
 
     post_whatsapp(user, "quiero reservar")
     post_whatsapp(user, "fisioterapia")
+    post_whatsapp(user, "me duele la rodilla")
     post_whatsapp(user, "Pau Marco")
     post_whatsapp(user, "mañana")
     offered = CTX.get(user)["offered_slots"]
@@ -207,6 +247,7 @@ def test_whatsapp_second_option_does_not_confirm_when_calendar_fails(monkeypatch
 
     post_whatsapp(user, "quiero cita")
     post_whatsapp(user, "fisioterapia")
+    post_whatsapp(user, "me duele la rodilla")
     post_whatsapp(user, "Pau Marco")
     post_whatsapp(user, "mañana")
     response = post_whatsapp(user, "2")
@@ -231,6 +272,7 @@ def test_whatsapp_real_calendar_freebusy_failure_does_not_offer_dummy_slots(monk
 
     post_whatsapp(user, "quiero cita")
     post_whatsapp(user, "fisioterapia")
+    post_whatsapp(user, "me duele la rodilla")
     post_whatsapp(user, "Pau Marco")
     response = post_whatsapp(user, "mañana")
 
@@ -258,6 +300,7 @@ def test_whatsapp_can_retry_third_option_after_calendar_failure(monkeypatch):
 
     post_whatsapp(user, "quiero cita")
     post_whatsapp(user, "fisioterapia")
+    post_whatsapp(user, "me duele la rodilla")
     post_whatsapp(user, "Pau Marco")
     post_whatsapp(user, "mañana")
     failed = post_whatsapp(user, "2")
@@ -281,6 +324,7 @@ def test_whatsapp_thanks_after_confirmed_booking_is_human(monkeypatch):
 
     post_whatsapp(user, "quiero cita")
     post_whatsapp(user, "fisioterapia")
+    post_whatsapp(user, "me duele la rodilla")
     post_whatsapp(user, "Pau Marco")
     post_whatsapp(user, "mañana")
     post_whatsapp(user, "2")
@@ -313,6 +357,7 @@ def test_whatsapp_farewell_after_confirmed_booking_mentions_slot(monkeypatch):
 
     post_whatsapp(user, "quiero cita")
     post_whatsapp(user, "fisioterapia")
+    post_whatsapp(user, "me duele la rodilla")
     post_whatsapp(user, "Pau Marco")
     post_whatsapp(user, "mañana")
     post_whatsapp(user, "2")
@@ -345,7 +390,7 @@ def test_whatsapp_services_and_hours_faq_are_distinct():
     assert "nuestro horario" in hours.lower()
 
 
-def test_whatsapp_valid_services_are_closed_catalog_and_ask_name():
+def test_whatsapp_valid_services_are_closed_catalog_and_ask_name_or_reason():
     cases = [
         ("quiero valoración inicial", "valoracion inicial"),
         ("quiero una primera visita", "valoracion inicial"),
@@ -359,8 +404,12 @@ def test_whatsapp_valid_services_are_closed_catalog_and_ask_name():
 
         response = post_whatsapp(user, message)
 
-        assert "nombre" in response.text.lower()
-        assert CTX.get_stage(user) == "awaiting_patient_name"
+        if expected_service == "sesion de fisioterapia":
+            assert "motivo" in response.text.lower()
+            assert CTX.get_stage(user) == "awaiting_consultation_reason"
+        else:
+            assert "nombre" in response.text.lower()
+            assert CTX.get_stage(user) == "awaiting_patient_name"
         assert CTX.get(user)["service"] == expected_service
 
 
@@ -417,10 +466,12 @@ def test_whatsapp_service_and_day_inside_booking_flow():
 
     post_whatsapp(user, "quiero reservar")
     service = post_whatsapp(user, "sesion de fisio")
+    reason = post_whatsapp(user, "me duele la rodilla")
     name = post_whatsapp(user, "Pau Marco")
     slots = post_whatsapp(user, "mañana mismo")
 
-    assert "nombre" in service.text.lower()
+    assert "motivo" in service.text.lower()
+    assert "nombre" in reason.text.lower()
     assert "día" in name.text.lower()
     assert "te puedo ofrecer" in slots.text.lower()
     assert CTX.get_stage(user) == "offering_slots"
@@ -432,6 +483,7 @@ def test_whatsapp_reset_clears_state_and_slots():
 
     post_whatsapp(user, "quiero cita")
     post_whatsapp(user, "fisioterapia")
+    post_whatsapp(user, "me duele la rodilla")
     post_whatsapp(user, "Pau Marco")
     post_whatsapp(user, "mañana")
     assert CTX.get(user)["offered_slots"]
@@ -441,6 +493,7 @@ def test_whatsapp_reset_clears_state_and_slots():
     assert "empezamos de nuevo" in response.text.lower()
     assert CTX.get_stage(user) == "idle"
     assert CTX.get(user)["offered_slots"] == []
+    assert CTX.get(user)["consultation_reason"] is None
 
 
 def test_whatsapp_reset_prevents_old_slot_selection():
@@ -449,6 +502,7 @@ def test_whatsapp_reset_prevents_old_slot_selection():
 
     post_whatsapp(user, "quiero cita")
     post_whatsapp(user, "fisioterapia")
+    post_whatsapp(user, "me duele la rodilla")
     post_whatsapp(user, "Pau Marco")
     post_whatsapp(user, "mañana")
     post_whatsapp(user, "empezar de nuevo")
@@ -464,6 +518,7 @@ def test_whatsapp_reset_does_not_delete_confirmed_appointments():
 
     post_whatsapp(user, "quiero cita")
     post_whatsapp(user, "fisioterapia")
+    post_whatsapp(user, "me duele la rodilla")
     post_whatsapp(user, "Pau Marco")
     post_whatsapp(user, "mañana")
     post_whatsapp(user, "1")
@@ -481,6 +536,7 @@ def test_whatsapp_reset_after_confirmed_booking_does_not_invent_recent_slot_repl
 
     post_whatsapp(user, "quiero cita")
     post_whatsapp(user, "fisioterapia")
+    post_whatsapp(user, "me duele la rodilla")
     post_whatsapp(user, "Pau Marco")
     post_whatsapp(user, "mañana")
     post_whatsapp(user, "1")

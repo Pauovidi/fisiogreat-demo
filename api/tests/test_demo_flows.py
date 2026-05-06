@@ -52,7 +52,8 @@ def test_whatsapp_creates_reschedules_and_cancels_fisiogreat_appointment():
     reset_state(user)
 
     assert "fisio" in post_whatsapp(user, "hola").text.lower()
-    assert "nombre" in post_whatsapp(user, "sesión de fisioterapia").text.lower()
+    assert "motivo" in post_whatsapp(user, "sesión de fisioterapia").text.lower()
+    assert "nombre" in post_whatsapp(user, "me duele la rodilla").text.lower()
     assert "día" in post_whatsapp(user, "Pau Marco").text.lower()
     offered = post_whatsapp(user, "jueves")
     assert "te puedo ofrecer" in offered.text.lower()
@@ -89,12 +90,98 @@ def test_voice_basic_booking_and_faq_are_fisiogreat():
     assert "tengo" in day.text.lower()
 
     pick = post_voice(call_sid, SpeechResult="segunda")
-    assert "perfecto" in pick.text.lower()
-    assert "pau" in pick.text.lower()
+    assert "telefono" in pick.text.lower() or "correo" in pick.text.lower()
+    contact = post_voice(call_sid, SpeechResult="mi email es pau@example.com")
+    assert "gracias" in contact.text.lower()
     assert len(STORE.appointments) == 1
 
     thanks = post_voice(call_sid, SpeechResult="gracias")
     assert "te esperamos" in thanks.text.lower()
+
+
+def test_voice_physiotherapy_requires_reason_and_contact_before_confirmation():
+    call_sid = "CA-voice-reason-contact-1"
+    reset_state(call_sid)
+
+    post_voice(call_sid)
+    service = post_voice(call_sid, SpeechResult="sesion de fisioterapia")
+    assert "motivo" in service.text.lower()
+
+    reason = post_voice(call_sid, SpeechResult="me duele la rodilla")
+    assert "nombre" in reason.text.lower()
+    assert CTX.get(call_sid)["consultation_reason"] == "me duele la rodilla"
+
+    post_voice(call_sid, SpeechResult="Pau Marco")
+    post_voice(call_sid, SpeechResult="jueves")
+    contact_prompt = post_voice(call_sid, SpeechResult="primera")
+
+    assert "telefono" in contact_prompt.text.lower() or "correo" in contact_prompt.text.lower()
+    assert CTX.get_stage(call_sid) == "awaiting_contact"
+    assert not STORE.appointments
+
+
+def test_voice_confirms_with_valid_email_and_stores_contact():
+    call_sid = "CA-voice-email-1"
+    reset_state(call_sid)
+
+    post_voice(call_sid)
+    post_voice(call_sid, SpeechResult="sesion de fisioterapia")
+    post_voice(call_sid, SpeechResult="me duele la rodilla")
+    post_voice(call_sid, SpeechResult="Pau Marco")
+    post_voice(call_sid, SpeechResult="jueves")
+    post_voice(call_sid, SpeechResult="primera")
+    response = post_voice(call_sid, SpeechResult="mi email es pau@example.com")
+
+    assert "gracias" in response.text.lower()
+    appointment = next(iter(STORE.appointments.values()))
+    assert appointment["metadata"]["contact_email"] == "pau@example.com"
+    assert appointment["metadata"]["consultation_reason"] == "me duele la rodilla"
+
+
+def test_voice_reprompts_invalid_contact_without_booking():
+    call_sid = "CA-voice-invalid-contact-1"
+    reset_state(call_sid)
+
+    post_voice(call_sid)
+    post_voice(call_sid, SpeechResult="valoracion inicial")
+    post_voice(call_sid, SpeechResult="Pau Marco")
+    post_voice(call_sid, SpeechResult="jueves")
+    post_voice(call_sid, SpeechResult="primera")
+    response = post_voice(call_sid, SpeechResult="no lo se")
+
+    assert "repetir" in response.text.lower()
+    assert CTX.get_stage(call_sid) == "awaiting_contact"
+    assert not STORE.appointments
+
+
+def test_voice_confirms_with_valid_phone_and_can_confirm_from_number():
+    phone_sid = "CA-voice-phone-1"
+    reset_state(phone_sid)
+
+    post_voice(phone_sid)
+    post_voice(phone_sid, SpeechResult="valoracion inicial")
+    post_voice(phone_sid, SpeechResult="Pau Marco")
+    post_voice(phone_sid, SpeechResult="jueves")
+    post_voice(phone_sid, SpeechResult="primera")
+    response = post_voice(phone_sid, SpeechResult="mi telefono es 640 78 67 65")
+
+    assert "gracias" in response.text.lower()
+    appointment = next(iter(STORE.appointments.values()))
+    assert appointment["metadata"]["contact_phone"] == "640786765"
+
+    from_sid = "CA-voice-from-1"
+    reset_state(from_sid)
+    post_voice(from_sid)
+    post_voice(from_sid, SpeechResult="valoracion inicial")
+    post_voice(from_sid, SpeechResult="Pau Marco")
+    post_voice(from_sid, SpeechResult="jueves")
+    prompt = post_voice(from_sid, SpeechResult="primera", From="+34640786765")
+    assert "este numero" in prompt.text.lower()
+    response = post_voice(from_sid, SpeechResult="si a este numero")
+
+    assert "gracias" in response.text.lower()
+    appointment = next(iter(STORE.appointments.values()))
+    assert appointment["metadata"]["contact_phone"] == "34640786765"
 
 
 def test_voice_reschedule_and_faq_prompts():
@@ -120,6 +207,7 @@ def test_voice_can_cancel_and_reschedule_existing_booking():
     post_voice(cancel_sid, SpeechResult="Pau Marco")
     post_voice(cancel_sid, SpeechResult="jueves")
     post_voice(cancel_sid, SpeechResult="primera")
+    post_voice(cancel_sid, SpeechResult="mi telefono es 640 78 67 65")
 
     post_voice(cancel_sid, SpeechResult="quiero cancelar la cita")
     cancelled = post_voice(cancel_sid, SpeechResult="jueves a las diez")
@@ -131,9 +219,11 @@ def test_voice_can_cancel_and_reschedule_existing_booking():
 
     post_voice(reschedule_sid)
     post_voice(reschedule_sid, SpeechResult="sesion de fisioterapia")
+    post_voice(reschedule_sid, SpeechResult="me duele la rodilla")
     post_voice(reschedule_sid, SpeechResult="Pau Marco")
     post_voice(reschedule_sid, SpeechResult="jueves")
     post_voice(reschedule_sid, SpeechResult="primera")
+    post_voice(reschedule_sid, SpeechResult="mi email es pau@example.com")
 
     post_voice(reschedule_sid, SpeechResult="quiero cambiar la cita")
     changed = post_voice(reschedule_sid, SpeechResult="viernes")

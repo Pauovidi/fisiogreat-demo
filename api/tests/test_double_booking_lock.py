@@ -24,6 +24,7 @@ def test_double_booking_lock_blocks_same_slot():
         service_type="sesion de fisioterapia",
         start_at=start,
         patient_name="Ana Marco",
+        contact_phone="640786765",
     ))
 
     assert first.ok

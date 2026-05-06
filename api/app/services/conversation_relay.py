@@ -7,6 +7,12 @@ from ..config.settings import settings
 from ..utils.date_parser import parse_spanish_day, parse_time_pref
 from ..utils.emergency_guard import detect_emergency, emergency_reply
 from ..utils.intent_router import detect_service, route_message
+from ..utils.booking_requirements import (
+    clean_consultation_reason,
+    confirms_current_phone,
+    extract_contact,
+    is_physiotherapy_session,
+)
 from ..utils.logger import logger
 from ..utils.mini_context import CTX
 from ..utils.patient_name import first_name, parse_patient_name
@@ -55,6 +61,9 @@ def handle_setup_message(session: ConversationRelaySession, payload: Dict[str, A
     session.prompt_buffer.clear()
     CTX.clear_flow(session.key)
     CTX.set_stage(session.key, "awaiting_service")
+    phone, _email = extract_contact(payload.get("from") or payload.get("From") or "")
+    if phone:
+        CTX.set_suggested_contact_phone(session.key, phone)
     logger.info(
         "conversationrelay_setup "
         f"call_sid={session.call_sid!r} session_id={session.session_id!r}"
@@ -153,6 +162,17 @@ def _latest_appointment_id(external_user_id: str) -> Optional[str]:
     return appointments[0]["id"]
 
 
+def _needs_consultation_reason(ctx: Dict[str, Any], service: Optional[str]) -> bool:
+    return is_physiotherapy_session(service) and not ctx.get("consultation_reason")
+
+
+def _contact_prompt(key: str) -> str:
+    ctx = CTX.get(key) or {}
+    if ctx.get("suggested_contact_phone"):
+        return copy.ask_contact_with_phone_suggestion()
+    return copy.ask_contact()
+
+
 async def _handle_user_input(key: str, user_text: str) -> str:
     current_stage = CTX.get_stage(key)
     emergency = detect_emergency(user_text)
@@ -186,6 +206,9 @@ async def _handle_user_input(key: str, user_text: str) -> str:
             service = route_peek.get("service")
             if service:
                 CTX.set_service(key, service)
+                if _needs_consultation_reason(CTX.get(key) or {}, service):
+                    CTX.set_stage(key, "awaiting_consultation_reason")
+                    return copy.ask_consultation_reason()
                 patient_name = await _resolve_patient_name(key)
                 if patient_name:
                     CTX.set_stage(key, "awaiting_date")
@@ -258,6 +281,11 @@ async def _handle_user_input(key: str, user_text: str) -> str:
 
         if service and parsed_date:
             CTX.set_service(key, service)
+            if _needs_consultation_reason(CTX.get(key) or {}, service):
+                CTX.set_date(key, parsed_date)
+                CTX.set_time_pref(key, time_pref)
+                CTX.set_stage(key, "awaiting_consultation_reason")
+                return copy.ask_consultation_reason()
             patient_name = await _resolve_patient_name(key)
             if patient_name:
                 return _offer_slots(key, service, parsed_date, time_pref)
@@ -268,6 +296,9 @@ async def _handle_user_input(key: str, user_text: str) -> str:
 
         if service:
             CTX.set_service(key, service)
+            if _needs_consultation_reason(CTX.get(key) or {}, service):
+                CTX.set_stage(key, "awaiting_consultation_reason")
+                return copy.ask_consultation_reason()
             patient_name = await _resolve_patient_name(key)
             if patient_name:
                 CTX.set_stage(key, "awaiting_date")
@@ -279,6 +310,24 @@ async def _handle_user_input(key: str, user_text: str) -> str:
         if natural.handled:
             return natural.reply or copy.ask_service()
         return copy.ask_service_retry()
+
+    if current_stage == "awaiting_consultation_reason":
+        reason = clean_consultation_reason(user_text)
+        if not reason:
+            return copy.ask_consultation_reason_retry()
+        CTX.set_consultation_reason(key, reason)
+        ctx = CTX.get(key) or {}
+        service = ctx.get("service")
+        date_pref = ctx.get("date_pref")
+        time_pref = ctx.get("time_pref")
+        patient_name = await _resolve_patient_name(key)
+        if not patient_name:
+            CTX.set_stage(key, "awaiting_patient_name")
+            return copy.consultation_reason_then_patient_name()
+        if service and date_pref:
+            return _offer_slots(key, service, date_pref, time_pref)
+        CTX.set_stage(key, "awaiting_date")
+        return copy.consultation_reason_then_date()
 
     if current_stage == "awaiting_patient_name":
         patient_name = parse_patient_name(user_text)
@@ -305,6 +354,11 @@ async def _handle_user_input(key: str, user_text: str) -> str:
             if not service:
                 CTX.set_stage(key, "awaiting_service")
                 return copy.ask_service()
+            if _needs_consultation_reason(ctx, service):
+                CTX.set_date(key, parsed_date)
+                CTX.set_time_pref(key, time_pref)
+                CTX.set_stage(key, "awaiting_consultation_reason")
+                return copy.ask_consultation_reason()
             return _offer_slots(key, service, parsed_date, time_pref)
 
         if time_pref:
@@ -337,22 +391,9 @@ async def _handle_user_input(key: str, user_text: str) -> str:
             service = ctx.get("service") or "sesion de fisioterapia"
             selected_dt = parse_slot_label(selected)
             if selected_dt:
-                booking_result = await confirm_slot(
-                    channel="voice",
-                    external_user_id=key,
-                    service_type=service,
-                    start_at=selected_dt,
-                    patient_name=ctx.get("patient_name"),
-                    metadata={"slot_label": selected, "transport": "conversationrelay"},
-                )
-                if not booking_result.ok:
-                    return "Ese hueco acaba de ocuparse. Te digo otras opciones."
-            appointment = booking_result.appointment if selected_dt else None
-            patient_name = (appointment or {}).get("metadata", {}).get("patient_name") or ctx.get("patient_name")
-            CTX.clear_flow(key)
-            CTX.set_last_confirmed_slot(key, selected, service=service, patient_name=patient_name)
-            CTX.set_stage(key, "completed")
-            return copy.confirm_booking(selected, service, patient_name)
+                CTX.set_pending_slot(key, selected)
+                CTX.set_stage(key, "awaiting_contact")
+                return _contact_prompt(key)
 
         service = ctx.get("service")
         date_pref = ctx.get("date_pref")
@@ -399,6 +440,48 @@ async def _handle_user_input(key: str, user_text: str) -> str:
             return out_of_scope_answer("voice")
         return copy.propose_slots(current)
 
+    if current_stage == "awaiting_contact":
+        ctx = CTX.get(key) or {}
+        phone, email = extract_contact(user_text)
+        if not phone and not email and confirms_current_phone(user_text) and ctx.get("suggested_contact_phone"):
+            phone = ctx.get("suggested_contact_phone")
+        if not phone and not email:
+            return copy.ask_contact_retry()
+        CTX.set_contact(
+            key,
+            contact_phone=phone,
+            contact_email=email,
+            contact_channel_preference="phone" if phone else "email",
+        )
+        ctx = CTX.get(key) or {}
+        selected = ctx.get("pending_slot")
+        service = ctx.get("service") or "sesion de fisioterapia"
+        selected_dt = parse_slot_label(selected or "")
+        if not selected_dt:
+            CTX.set_stage(key, "awaiting_date")
+            return copy.ask_date(service)
+        booking_result = await confirm_slot(
+            channel="voice",
+            external_user_id=key,
+            service_type=service,
+            start_at=selected_dt,
+            patient_name=ctx.get("patient_name"),
+            consultation_reason=ctx.get("consultation_reason"),
+            contact_phone=ctx.get("contact_phone"),
+            contact_email=ctx.get("contact_email"),
+            metadata={"slot_label": selected, "transport": "conversationrelay"},
+        )
+        if not booking_result.ok:
+            if booking_result.reason == "missing_contact":
+                return copy.ask_contact_retry()
+            return "Ese hueco acaba de ocuparse. Te digo otras opciones."
+        appointment = booking_result.appointment
+        patient_name = (appointment or {}).get("metadata", {}).get("patient_name") or ctx.get("patient_name")
+        CTX.clear_flow(key)
+        CTX.set_last_confirmed_slot(key, selected, service=service, patient_name=patient_name)
+        CTX.set_stage(key, "completed")
+        return copy.confirm_booking(selected, service, patient_name)
+
     route = route_message(user_text)
     if route["type"] == "greeting":
         CTX.clear_flow(key)
@@ -410,6 +493,9 @@ async def _handle_user_input(key: str, user_text: str) -> str:
         service = route.get("service")
         if service:
             CTX.set_service(key, service)
+            if _needs_consultation_reason(CTX.get(key) or {}, service):
+                CTX.set_stage(key, "awaiting_consultation_reason")
+                return copy.ask_consultation_reason()
             patient_name = await _resolve_patient_name(key)
             if patient_name:
                 CTX.set_stage(key, "awaiting_date")
@@ -453,6 +539,10 @@ def _reprompt_for_stage(key: str) -> str:
         return "Dime el nuevo dia que te vendria mejor."
     if stage == "awaiting_patient_name":
         return copy.ask_patient_name(ctx.get("service"))
+    if stage == "awaiting_consultation_reason":
+        return copy.ask_consultation_reason_retry()
+    if stage == "awaiting_contact":
+        return copy.ask_contact_retry()
     if stage == "awaiting_date":
         return copy.ask_date(ctx.get("service"))
     if stage == "offering_slots":

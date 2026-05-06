@@ -15,6 +15,12 @@ class MiniContext:
             "service": None,
             "date_pref": None,
             "time_pref": None,
+            "consultation_reason": None,
+            "contact_phone": None,
+            "contact_email": None,
+            "contact_channel_preference": None,
+            "suggested_contact_phone": None,
+            "pending_slot": None,
             "patient_name": None,
             "patient_name_source": None,
             "offered_slots": [],
@@ -65,6 +71,34 @@ class MiniContext:
     def set_time_pref(self, key: str, time_pref: Optional[str]):
         entry = self._touch(key)
         entry["time_pref"] = time_pref
+
+    def set_consultation_reason(self, key: str, consultation_reason: Optional[str]):
+        entry = self._touch(key)
+        entry["consultation_reason"] = consultation_reason
+
+    def set_contact(
+        self,
+        key: str,
+        *,
+        contact_phone: Optional[str] = None,
+        contact_email: Optional[str] = None,
+        contact_channel_preference: Optional[str] = None,
+    ):
+        entry = self._touch(key)
+        if contact_phone:
+            entry["contact_phone"] = contact_phone
+        if contact_email:
+            entry["contact_email"] = contact_email
+        if contact_channel_preference:
+            entry["contact_channel_preference"] = contact_channel_preference
+
+    def set_suggested_contact_phone(self, key: str, contact_phone: Optional[str]):
+        entry = self._touch(key)
+        entry["suggested_contact_phone"] = contact_phone
+
+    def set_pending_slot(self, key: str, slot: Optional[str]):
+        entry = self._touch(key)
+        entry["pending_slot"] = slot
 
     def set_patient_name(self, key: str, patient_name: Optional[str], source: Optional[str] = None):
         entry = self._touch(key)

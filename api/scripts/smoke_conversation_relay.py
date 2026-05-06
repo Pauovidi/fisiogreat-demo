@@ -27,6 +27,7 @@ def main():
             {"type": "prompt", "voicePrompt": "Pau Marco", "last": True},
             {"type": "prompt", "voicePrompt": "jueves", "last": True},
             {"type": "prompt", "voicePrompt": "segunda", "last": True},
+            {"type": "prompt", "voicePrompt": "mi email es pau@example.com", "last": True},
         ]
 
         for index, payload in enumerate(steps, start=1):

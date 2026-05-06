@@ -17,9 +17,11 @@ def main():
     sequence = [
         {},
         {"SpeechResult": "sesion de fisioterapia"},
+        {"SpeechResult": "me duele la rodilla"},
         {"SpeechResult": "Pau Marco"},
         {"SpeechResult": "jueves por la tarde"},
         {"Digits": "1"},
+        {"SpeechResult": "mi email es pau@example.com"},
         {"SpeechResult": "cual es el horario"},
     ]
 

@@ -72,6 +72,37 @@ class VoiceCopy:
         return "Perfecto. A que nombre dejamos la cita?"
 
     @staticmethod
+    def ask_consultation_reason() -> str:
+        return "Para que el fisioterapeuta pueda preparar mejor la sesion, cual es el motivo de la consulta?"
+
+    @staticmethod
+    def ask_consultation_reason_retry() -> str:
+        return "Puedes contarme brevemente el motivo de la consulta?"
+
+    @staticmethod
+    def consultation_reason_then_patient_name() -> str:
+        return "De acuerdo, con esta informacion podemos preparar mejor tu sesion. A que nombre dejamos la cita?"
+
+    @staticmethod
+    def consultation_reason_then_date() -> str:
+        return "De acuerdo, con esta informacion podemos preparar mejor tu sesion. Que dia te va bien?"
+
+    @staticmethod
+    def ask_contact() -> str:
+        return "Para enviarte la confirmacion y el recordatorio, me das un telefono movil o un correo electronico?"
+
+    @staticmethod
+    def ask_contact_with_phone_suggestion() -> str:
+        return (
+            "Tengo este numero de llamada. Quieres que enviemos ahi la confirmacion "
+            "o prefieres darme otro telefono o email?"
+        )
+
+    @staticmethod
+    def ask_contact_retry() -> str:
+        return "No lo he entendido bien. Puedes repetir el telefono o el email?"
+
+    @staticmethod
     def thanks_name_then_date(first_name: str) -> str:
         return f"Gracias, {first_name}. Que dia te va bien?"
 
@@ -110,10 +141,8 @@ class VoiceCopy:
 
     @staticmethod
     def confirm_booking(slot: str, service: Optional[str] = None, patient_name: Optional[str] = None) -> str:
-        name = VoiceCopy._first_name(patient_name)
-        name_part = f", {name}" if name else ""
         service_part = f" para {service}" if service else ""
-        return f"Perfecto{name_part}, te apunto{service_part} {VoiceCopy._slot_to_confirmation_text(slot)}."
+        return f"Gracias. Te dejo apuntada la cita{service_part} {VoiceCopy._slot_to_confirmation_text(slot)}."
 
     @staticmethod
     def out_of_scope() -> str:

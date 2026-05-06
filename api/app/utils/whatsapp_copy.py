@@ -35,6 +35,26 @@ class WhatsAppCopy:
         return "Perfecto. ¿A qué nombre dejamos la cita?"
 
     @staticmethod
+    def ask_consultation_reason() -> str:
+        return (
+            "Perfecto para sesión de fisioterapia. Para que el fisioterapeuta pueda preparar mejor la sesión, "
+            "¿cuál es el motivo de la consulta? Por ejemplo: me duele la rodilla, tengo una contractura "
+            "o vengo por una sobrecarga."
+        )
+
+    @staticmethod
+    def ask_consultation_reason_retry() -> str:
+        return "¿Puedes contarme brevemente el motivo de la consulta?"
+
+    @staticmethod
+    def consultation_reason_then_patient_name() -> str:
+        return "De acuerdo, con esta información podemos preparar mejor tu sesión. ¿A qué nombre dejamos la cita?"
+
+    @staticmethod
+    def consultation_reason_then_date() -> str:
+        return "De acuerdo, con esta información podemos preparar mejor tu sesión. ¿Qué día te viene bien?"
+
+    @staticmethod
     def ask_patient_name_before_slots() -> str:
         return "Antes de buscar huecos, ¿a qué nombre dejamos la cita?"
 

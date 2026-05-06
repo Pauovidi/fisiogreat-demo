@@ -69,11 +69,31 @@ async def confirm_slot(
     start_at: dt.datetime,
     end_at: Optional[dt.datetime] = None,
     patient_name: Optional[str] = None,
+    consultation_reason: Optional[str] = None,
+    contact_phone: Optional[str] = None,
+    contact_email: Optional[str] = None,
     metadata: Optional[Dict[str, Any]] = None,
 ) -> BookingResult:
     clinic_id = settings.DEMO_CLINIC_ID
     resource_id = settings.GOOGLE_CALENDAR_ID or "demo-calendar"
     end_at = end_at or start_at + dt.timedelta(minutes=service_duration_minutes(service_type))
+    channel = (channel or "").strip().lower()
+    if channel == "whatsapp" and not contact_phone and external_user_id:
+        contact_phone = external_user_id
+    contact_channel_preference = None
+    if contact_email and contact_phone:
+        contact_channel_preference = "phone_or_email"
+    elif contact_email:
+        contact_channel_preference = "email"
+    elif contact_phone:
+        contact_channel_preference = "phone"
+    if channel == "voice" and not (contact_phone or contact_email):
+        logger.warning(
+            "booking_confirm_missing_contact channel=%s external_user_present=%s",
+            channel,
+            bool(external_user_id),
+        )
+        return BookingResult(False, reason="missing_contact")
     logger.info(
         "booking_confirm_start use_real_calendar=%s channel=%s proposed_slot_start=%s proposed_slot_end=%s",
         settings.USE_REAL_CALENDAR,
@@ -94,7 +114,7 @@ async def confirm_slot(
     try:
         patient = await supabase_repo.upsert_patient_by_phone(
             clinic_id=clinic_id,
-            phone=external_user_id,
+            phone=contact_phone or external_user_id,
             name=patient_name,
         )
         if not patient.get("name"):
@@ -136,19 +156,58 @@ async def confirm_slot(
         event_summary = f"{settings.CLINIC_NAME} - {service_type}"
         if patient.get("name"):
             event_summary = f"{event_summary} - {patient['name']}"
-        event_description = (
-            f"Paciente: {patient.get('name') or 'No indicado'}\n"
-            f"Canal: {channel}\n"
-            f"Teléfono: {external_user_id}\n"
-            f"Servicio: {service_type}"
-        )
+        appointment_metadata = {
+            **(metadata or {}),
+            "patient_name": patient.get("name"),
+            "channel": channel,
+        }
+        if consultation_reason:
+            appointment_metadata["consultation_reason"] = consultation_reason
+        if contact_phone:
+            appointment_metadata["contact_phone"] = contact_phone
+        if contact_email:
+            appointment_metadata["contact_email"] = contact_email
+        if contact_channel_preference:
+            appointment_metadata["contact_channel_preference"] = contact_channel_preference
+
+        description_lines = [
+            f"Paciente: {patient.get('name') or 'No indicado'}",
+            f"Servicio: {service_type}",
+        ]
+        if consultation_reason:
+            description_lines.append(f"Motivo de consulta: {consultation_reason}")
+        description_lines.append(f"Canal: {channel}")
+        contact_values = []
+        if contact_phone:
+            contact_values.append(f"telefono {contact_phone}")
+        if contact_email:
+            contact_values.append(f"email {contact_email}")
+        if contact_values:
+            description_lines.append(f"Contacto para recordatorio: {', '.join(contact_values)}")
+        event_description = "\n".join(description_lines)
         calendar_event_id = calendar_service.create_event(
             event_id=event_id,
             summary=event_summary,
             start_at=start_at,
             end_at=end_at,
             description=event_description,
-            metadata={"channel": channel, "clinic_id": clinic_id, "patient_name_present": bool(patient.get("name"))},
+            metadata={
+                "channel": channel,
+                "clinic_id": clinic_id,
+                "patient_name_present": bool(patient.get("name")),
+                **{
+                    key: value
+                    for key, value in appointment_metadata.items()
+                    if key
+                    in {
+                        "consultation_reason",
+                        "contact_phone",
+                        "contact_email",
+                        "contact_channel_preference",
+                    }
+                    and value
+                },
+            },
         )
         logger.info(
             "calendar_create_success use_real_calendar=%s calendar_event_id=%s",
@@ -166,7 +225,7 @@ async def confirm_slot(
             calendar_event_id=calendar_event_id,
             channel=channel,
             external_user_id=external_user_id,
-            metadata={**(metadata or {}), "patient_name": patient.get("name")},
+            metadata=appointment_metadata,
         )
         logger.info(
             "booking_confirm_success use_real_calendar=%s calendar_event_id=%s appointment_id=%s appointment_confirmed_with_patient_name=%s",

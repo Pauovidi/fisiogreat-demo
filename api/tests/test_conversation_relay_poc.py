@@ -50,6 +50,12 @@ def test_conversationrelay_booking_keeps_text_last_shape():
         assert "fisiogreat" in opening["token"].lower()
 
         websocket.send_json({"type": "prompt", "voicePrompt": "sesion de fisioterapia", "last": True})
+        ask_reason = websocket.receive_json()
+        assert ask_reason["type"] == "text"
+        assert ask_reason["last"] is True
+        assert "motivo" in ask_reason["token"].lower()
+
+        websocket.send_json({"type": "prompt", "voicePrompt": "me duele la rodilla", "last": True})
         ask_name = websocket.receive_json()
         assert ask_name["type"] == "text"
         assert ask_name["last"] is True
@@ -68,11 +74,17 @@ def test_conversationrelay_booking_keeps_text_last_shape():
         assert "tengo" in offer["token"].lower()
 
         websocket.send_json({"type": "prompt", "voicePrompt": "primera", "last": True})
+        ask_contact = websocket.receive_json()
+        assert ask_contact["type"] == "text"
+        assert ask_contact["last"] is True
+        assert "telefono" in ask_contact["token"].lower() or "correo" in ask_contact["token"].lower()
+
+        websocket.send_json({"type": "prompt", "voicePrompt": "mi email es pau@example.com", "last": True})
         confirm = websocket.receive_json()
         assert confirm["type"] == "text"
         assert confirm["last"] is True
-        assert "perfecto" in confirm["token"].lower()
-        assert "pau" in confirm["token"].lower()
+        assert "gracias" in confirm["token"].lower()
+        assert STORE.appointments
 
 
 def test_conversationrelay_calendar_failure_does_not_confirm(monkeypatch):
@@ -93,11 +105,15 @@ def test_conversationrelay_calendar_failure_does_not_confirm(monkeypatch):
         websocket.receive_json()
         websocket.send_json({"type": "prompt", "voicePrompt": "sesion de fisioterapia", "last": True})
         websocket.receive_json()
+        websocket.send_json({"type": "prompt", "voicePrompt": "me duele la rodilla", "last": True})
+        websocket.receive_json()
         websocket.send_json({"type": "prompt", "voicePrompt": "Pau Marco", "last": True})
         websocket.receive_json()
         websocket.send_json({"type": "prompt", "voicePrompt": "jueves", "last": True})
         websocket.receive_json()
         websocket.send_json({"type": "prompt", "voicePrompt": "primera", "last": True})
+        websocket.receive_json()
+        websocket.send_json({"type": "prompt", "voicePrompt": "mi email es pau@example.com", "last": True})
         response = websocket.receive_json()
 
     assert response["type"] == "text"

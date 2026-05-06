@@ -27,6 +27,7 @@ async def run():
         service_type="sesion de fisioterapia",
         start_at=start,
         patient_name="Ana Marco",
+        contact_phone="640786765",
     )
     print(f"FIRST_OK: {first.ok}")
     print(f"SECOND_OK: {second.ok}")

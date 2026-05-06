@@ -29,6 +29,12 @@ from ..services.salon_knowledge import out_of_scope_answer
 from ..utils.date_parser import parse_spanish_day, parse_time_pref
 from ..utils.intent_router import detect_service, route_message
 from ..utils.emergency_guard import detect_emergency, emergency_reply
+from ..utils.booking_requirements import (
+    clean_consultation_reason,
+    confirms_current_phone,
+    extract_contact,
+    is_physiotherapy_session,
+)
 from ..utils.logger import logger
 from ..utils.mini_context import CTX
 from ..utils.patient_name import first_name, parse_patient_name
@@ -79,6 +85,21 @@ def _normalize_voice_text(text: str) -> str:
 def _looks_like_lavado_only(text: str) -> bool:
     normalized = _normalize_voice_text(text)
     return "lavado" in normalized and "corte" not in normalized
+
+
+def _needs_consultation_reason(ctx: Dict[str, Any], service: Optional[str]) -> bool:
+    return is_physiotherapy_session(service) and not ctx.get("consultation_reason")
+
+
+def _contact_prompt_for_call(call_sid: str, from_value: Optional[str]) -> str:
+    ctx = CTX.get(call_sid) or {}
+    phone, _email = extract_contact(from_value or "")
+    if phone:
+        CTX.set_suggested_contact_phone(call_sid, phone)
+        return copy.ask_contact_with_phone_suggestion()
+    if ctx.get("suggested_contact_phone"):
+        return copy.ask_contact_with_phone_suggestion()
+    return copy.ask_contact()
 
 
 def _latest_appointment_id(external_user_id: str) -> Optional[str]:
@@ -247,6 +268,10 @@ def _reprompt_for_stage(call_sid: str) -> str:
         return "Dime el nuevo dia que te vendria mejor."
     if stage == "awaiting_patient_name":
         return copy.ask_patient_name(ctx.get("service"))
+    if stage == "awaiting_consultation_reason":
+        return copy.ask_consultation_reason_retry()
+    if stage == "awaiting_contact":
+        return copy.ask_contact_retry()
     if stage == "awaiting_date":
         return copy.ask_date(ctx.get("service"))
     if stage == "offering_slots":
@@ -414,7 +439,7 @@ async def agent_entry(
     SpeechResult: str | None = Form(None),
     Digits: str | None = Form(None),
 ):
-    del request, From
+    del request
     start = time.perf_counter()
     stats: Dict[str, Any] = {
         "start": start,
@@ -494,6 +519,11 @@ async def agent_entry(
                 service = route.get("service")
                 if service:
                     CTX.set_service(CallSid, service)
+                    if _needs_consultation_reason(CTX.get(CallSid) or {}, service):
+                        CTX.set_stage(CallSid, "awaiting_consultation_reason")
+                        stats["branch"] = "completed_restart_booking_service_ask_reason"
+                        stats["stage_after"] = "awaiting_consultation_reason"
+                        return _respond_gather(CallSid, copy.ask_consultation_reason(), stats)
                     patient_name = await _resolve_patient_name(CallSid)
                     if patient_name:
                         CTX.set_stage(CallSid, "awaiting_date")
@@ -605,6 +635,13 @@ async def agent_entry(
 
             if service and parsed_date:
                 CTX.set_service(CallSid, service)
+                if _needs_consultation_reason(CTX.get(CallSid) or {}, service):
+                    CTX.set_date(CallSid, parsed_date)
+                    CTX.set_time_pref(CallSid, time_pref)
+                    CTX.set_stage(CallSid, "awaiting_consultation_reason")
+                    stats["branch"] = "service_date_ask_reason"
+                    stats["stage_after"] = "awaiting_consultation_reason"
+                    return _respond_gather(CallSid, copy.ask_consultation_reason(), stats)
                 patient_name = await _resolve_patient_name(CallSid)
                 if patient_name:
                     stats["branch"] = "service_date_patient_known"
@@ -618,6 +655,11 @@ async def agent_entry(
 
             if service:
                 CTX.set_service(CallSid, service)
+                if _needs_consultation_reason(CTX.get(CallSid) or {}, service):
+                    CTX.set_stage(CallSid, "awaiting_consultation_reason")
+                    stats["branch"] = "service_ok_ask_reason"
+                    stats["stage_after"] = "awaiting_consultation_reason"
+                    return _respond_gather(CallSid, copy.ask_consultation_reason(), stats)
                 patient_name = await _resolve_patient_name(CallSid)
                 if patient_name:
                     CTX.set_stage(CallSid, "awaiting_date")
@@ -637,6 +679,31 @@ async def agent_entry(
 
             stats["branch"] = "service_retry"
             return _respond_gather(CallSid, copy.ask_service_retry(), stats)
+
+        if current_stage == "awaiting_consultation_reason":
+            reason = clean_consultation_reason(user_text)
+            if not reason:
+                stats["branch"] = "consultation_reason_retry"
+                stats["stage_after"] = "awaiting_consultation_reason"
+                return _respond_gather(CallSid, copy.ask_consultation_reason_retry(), stats)
+            CTX.set_consultation_reason(CallSid, reason)
+            ctx = CTX.get(CallSid) or {}
+            service = ctx.get("service")
+            date_pref = ctx.get("date_pref")
+            time_pref = ctx.get("time_pref")
+            patient_name = await _resolve_patient_name(CallSid)
+            if not patient_name:
+                CTX.set_stage(CallSid, "awaiting_patient_name")
+                stats["branch"] = "consultation_reason_then_patient_name"
+                stats["stage_after"] = "awaiting_patient_name"
+                return _respond_gather(CallSid, copy.consultation_reason_then_patient_name(), stats)
+            if service and date_pref:
+                stats["branch"] = "consultation_reason_then_slots"
+                return _offer_slots(CallSid, service, date_pref, time_pref, stats)
+            CTX.set_stage(CallSid, "awaiting_date")
+            stats["branch"] = "consultation_reason_then_date"
+            stats["stage_after"] = "awaiting_date"
+            return _respond_gather(CallSid, copy.consultation_reason_then_date(), stats)
 
         if current_stage == "awaiting_patient_name":
             patient_name = parse_patient_name(user_text)
@@ -672,6 +739,13 @@ async def agent_entry(
                     stats["branch"] = "missing_service"
                     stats["stage_after"] = "awaiting_service"
                     return _respond_gather(CallSid, copy.ask_service(), stats)
+                if _needs_consultation_reason(ctx, service):
+                    CTX.set_date(CallSid, parsed_date)
+                    CTX.set_time_pref(CallSid, time_pref)
+                    CTX.set_stage(CallSid, "awaiting_consultation_reason")
+                    stats["branch"] = "date_ok_ask_reason"
+                    stats["stage_after"] = "awaiting_consultation_reason"
+                    return _respond_gather(CallSid, copy.ask_consultation_reason(), stats)
 
                 stats["branch"] = "date_ok"
                 return _offer_slots(CallSid, service, parsed_date, time_pref, stats)
@@ -715,30 +789,11 @@ async def agent_entry(
                 ctx = CTX.get(CallSid) or {}
                 service = ctx.get("service") or "sesion de fisioterapia"
                 selected_dt = parse_slot_label(selected)
-                if selected_dt:
-                    booking_result = await confirm_slot(
-                        channel="voice",
-                        external_user_id=CallSid,
-                        service_type=service,
-                        start_at=selected_dt,
-                        patient_name=ctx.get("patient_name"),
-                        metadata={"slot_label": selected},
-                    )
-                    if not booking_result.ok:
-                        stats["branch"] = f"slot_confirm_failed_{booking_result.reason}"
-                        return _respond_gather(
-                            CallSid,
-                            "Ese hueco acaba de ocuparse. Te digo otras opciones.",
-                            stats,
-                        )
-                appointment = booking_result.appointment if selected_dt else None
-                patient_name = (appointment or {}).get("metadata", {}).get("patient_name") or ctx.get("patient_name")
-                CTX.clear_flow(CallSid)
-                CTX.set_last_confirmed_slot(CallSid, selected, service=service, patient_name=patient_name)
-                stats["branch"] = "slot_selected"
-                CTX.set_stage(CallSid, "completed")
-                stats["stage_after"] = "completed"
-                return _respond_gather(CallSid, copy.confirm_booking(selected, service, patient_name), stats)
+                CTX.set_pending_slot(CallSid, selected)
+                CTX.set_stage(CallSid, "awaiting_contact")
+                stats["branch"] = "slot_selected_ask_contact"
+                stats["stage_after"] = "awaiting_contact"
+                return _respond_gather(CallSid, _contact_prompt_for_call(CallSid, From), stats)
 
             if reparsed_date:
                 ctx = CTX.get(CallSid) or {}
@@ -802,6 +857,60 @@ async def agent_entry(
             stats["branch"] = "slot_retry"
             return _respond_gather(CallSid, copy.propose_slots(current), stats)
 
+        if current_stage == "awaiting_contact":
+            ctx = CTX.get(CallSid) or {}
+            phone, email = extract_contact(user_text)
+            if not phone and not email and confirms_current_phone(user_text) and ctx.get("suggested_contact_phone"):
+                phone = ctx.get("suggested_contact_phone")
+            if not phone and not email:
+                stats["branch"] = "contact_retry"
+                stats["stage_after"] = "awaiting_contact"
+                return _respond_gather(CallSid, copy.ask_contact_retry(), stats)
+            CTX.set_contact(
+                CallSid,
+                contact_phone=phone,
+                contact_email=email,
+                contact_channel_preference="phone" if phone else "email",
+            )
+            ctx = CTX.get(CallSid) or {}
+            selected = ctx.get("pending_slot")
+            service = ctx.get("service") or "sesion de fisioterapia"
+            selected_dt = parse_slot_label(selected or "")
+            if selected_dt:
+                booking_result = await confirm_slot(
+                    channel="voice",
+                    external_user_id=CallSid,
+                    service_type=service,
+                    start_at=selected_dt,
+                    patient_name=ctx.get("patient_name"),
+                    consultation_reason=ctx.get("consultation_reason"),
+                    contact_phone=ctx.get("contact_phone"),
+                    contact_email=ctx.get("contact_email"),
+                    metadata={"slot_label": selected},
+                )
+                if not booking_result.ok:
+                    stats["branch"] = f"slot_confirm_failed_{booking_result.reason}"
+                    if booking_result.reason == "missing_contact":
+                        stats["stage_after"] = "awaiting_contact"
+                        return _respond_gather(CallSid, copy.ask_contact_retry(), stats)
+                    return _respond_gather(
+                        CallSid,
+                        "Ese hueco acaba de ocuparse. Te digo otras opciones.",
+                        stats,
+                    )
+                appointment = booking_result.appointment
+                patient_name = (appointment or {}).get("metadata", {}).get("patient_name") or ctx.get("patient_name")
+                CTX.clear_flow(CallSid)
+                CTX.set_last_confirmed_slot(CallSid, selected, service=service, patient_name=patient_name)
+                stats["branch"] = "contact_then_slot_confirmed"
+                CTX.set_stage(CallSid, "completed")
+                stats["stage_after"] = "completed"
+                return _respond_gather(CallSid, copy.confirm_booking(selected, service, patient_name), stats)
+            stats["branch"] = "contact_missing_pending_slot"
+            stats["stage_after"] = "awaiting_date"
+            CTX.set_stage(CallSid, "awaiting_date")
+            return _respond_gather(CallSid, copy.ask_date(service), stats)
+
         parse_start = time.perf_counter()
         stats["intent_ms"] += (time.perf_counter() - parse_start) * 1000
         route_type = route["type"]
@@ -818,6 +927,11 @@ async def agent_entry(
             service = route.get("service")
             if service:
                 CTX.set_service(CallSid, service)
+                if _needs_consultation_reason(CTX.get(CallSid) or {}, service):
+                    CTX.set_stage(CallSid, "awaiting_consultation_reason")
+                    stats["branch"] = "booking_service_ask_reason"
+                    stats["stage_after"] = "awaiting_consultation_reason"
+                    return _respond_gather(CallSid, copy.ask_consultation_reason(), stats)
                 patient_name = await _resolve_patient_name(CallSid)
                 if patient_name:
                     CTX.set_stage(CallSid, "awaiting_date")

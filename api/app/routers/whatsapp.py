@@ -20,6 +20,7 @@ from ..utils.date_parser import parse_spanish_day, parse_time_pref
 from ..utils.faq import get_faq_answer
 from ..utils.intent_router import detect_service, normalize_text, route_message
 from ..utils.emergency_guard import detect_emergency, emergency_reply
+from ..utils.booking_requirements import clean_consultation_reason, is_physiotherapy_session
 from ..utils.logger import logger
 from ..utils.mini_context import CTX
 from ..utils.patient_name import first_name, parse_patient_name
@@ -136,6 +137,8 @@ def _faq_with_reengagement(key: str, faq_id: str = "hours") -> str:
         return f"{answer}\n\n{copy.ask_date(ctx.get('service'))}"
     if stage == "awaiting_patient_name":
         return f"{answer}\n\n{copy.ask_patient_name(ctx.get('service'))}"
+    if stage == "awaiting_consultation_reason":
+        return f"{answer}\n\n{copy.ask_consultation_reason_retry()}"
     if stage == "offering_slots":
         current = _current_slots(key)
         if current:
@@ -162,7 +165,14 @@ RESET_COMMANDS = {
     "olvida lo anterior",
 }
 
-PENDING_FLOW_STAGES = {"awaiting_service", "awaiting_patient_name", "awaiting_date", "offering_slots", "awaiting_reschedule_date"}
+PENDING_FLOW_STAGES = {
+    "awaiting_service",
+    "awaiting_consultation_reason",
+    "awaiting_patient_name",
+    "awaiting_date",
+    "offering_slots",
+    "awaiting_reschedule_date",
+}
 
 
 def _is_reset_command(body: str) -> bool:
@@ -233,6 +243,10 @@ def _patient_name_prompt(*, service: Optional[str], reason: str) -> str:
     return copy.ask_patient_name(service)
 
 
+def _needs_consultation_reason(ctx: dict, service: Optional[str]) -> bool:
+    return is_physiotherapy_session(service) and not ctx.get("consultation_reason")
+
+
 async def _store_manual_patient_name(key: str, patient_name: str) -> None:
     CTX.set_patient_name(key, patient_name, "manual")
     try:
@@ -298,6 +312,11 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
         if current_stage == "awaiting_service":
             service = detect_service(body)
             if service:
+                CTX.set_service(wa_from, service)
+                ctx = CTX.get(wa_from) or {}
+                if _needs_consultation_reason(ctx, service):
+                    CTX.set_stage(wa_from, "awaiting_consultation_reason")
+                    return _twiml(copy.ask_consultation_reason())
                 patient_name = await _ensure_patient_name_before_slots_or_confirmation(
                     wa_from,
                     service=service,
@@ -313,6 +332,23 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
                 return _twiml(copy.unsupported_service())
             if not _is_state_interrupt(route_peek["type"]):
                 return _twiml(copy.ask_service_retry())
+
+        elif current_stage == "awaiting_consultation_reason":
+            reason = clean_consultation_reason(body)
+            if not reason:
+                return _twiml(copy.ask_consultation_reason_retry())
+            CTX.set_consultation_reason(wa_from, reason)
+            ctx = CTX.get(wa_from) or {}
+            service = ctx.get("service")
+            patient_name = await _ensure_patient_name_before_slots_or_confirmation(
+                wa_from,
+                service=service,
+                reason="service",
+            )
+            if not patient_name:
+                return _twiml(copy.consultation_reason_then_patient_name())
+            CTX.set_stage(wa_from, "awaiting_date")
+            return _twiml(copy.consultation_reason_then_date())
 
         elif current_stage == "awaiting_patient_name":
             route_peek = route_message(body)
@@ -338,6 +374,9 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
                 if not service:
                     CTX.set_stage(wa_from, "awaiting_service")
                     return _twiml(copy.ask_service_retry())
+                if _needs_consultation_reason(ctx, service):
+                    CTX.set_stage(wa_from, "awaiting_consultation_reason")
+                    return _twiml(copy.ask_consultation_reason())
                 patient_name = await _ensure_patient_name_before_slots_or_confirmation(
                     wa_from,
                     service=service,
@@ -364,6 +403,9 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
             if selected:
                 ctx = CTX.get(wa_from) or {}
                 service = ctx.get("service") or "sesion de fisioterapia"
+                if _needs_consultation_reason(ctx, service):
+                    CTX.set_stage(wa_from, "awaiting_consultation_reason")
+                    return _twiml(copy.ask_consultation_reason())
                 patient_name = await _ensure_patient_name_before_slots_or_confirmation(
                     wa_from,
                     service=service,
@@ -387,6 +429,8 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
                     service_type=service,
                     start_at=selected_dt,
                     patient_name=patient_name,
+                    consultation_reason=ctx.get("consultation_reason"),
+                    contact_phone=wa_from,
                     metadata={"slot_label": selected},
                 )
                 if not booking_result.ok:
@@ -460,6 +504,11 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
             CTX.clear_flow(wa_from)
             service = route.get("service")
             if service:
+                CTX.set_service(wa_from, service)
+                ctx = CTX.get(wa_from) or {}
+                if _needs_consultation_reason(ctx, service):
+                    CTX.set_stage(wa_from, "awaiting_consultation_reason")
+                    return _twiml(copy.ask_consultation_reason())
                 patient_name = await _ensure_patient_name_before_slots_or_confirmation(
                     wa_from,
                     service=service,
