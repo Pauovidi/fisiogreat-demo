@@ -137,10 +137,17 @@ class WhatsAppCopy:
         return "Ahora mismo te ayudo con citas, horarios y dudas básicas de FisioGreat."
 
     @staticmethod
-    def unsupported_service() -> str:
+    def unsupported_service(service: Optional[str] = None) -> str:
+        if service:
+            return (
+                f"En esta demo no puedo reservar {service}. "
+                "Puedo gestionar valoración inicial, sesión de fisioterapia y consulta de seguimiento. "
+                "Si necesitas otro servicio, puedo derivarte a una persona del equipo."
+            )
         return (
-            "En esta demo puedo gestionar valoración inicial, sesión de fisioterapia y consulta de seguimiento. "
-            "Para otros servicios, puedo derivarte a una persona del equipo. ¿Quieres reservar uno de estos servicios?"
+            "En esta demo no puedo reservar ese servicio. "
+            "Puedo gestionar valoración inicial, sesión de fisioterapia y consulta de seguimiento. "
+            "Si necesitas otro servicio, puedo derivarte a una persona del equipo."
         )
 
     @staticmethod

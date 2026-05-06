@@ -128,7 +128,7 @@ def _overlaps(start_a: dt.datetime, end_a: dt.datetime, start_b: dt.datetime, en
     return start_a < end_b and start_b < end_a
 
 
-def free_busy(start_at: dt.datetime, end_at: dt.datetime) -> List[Dict[str, str]]:
+def free_busy(start_at: dt.datetime, end_at: dt.datetime, *, ignore_event_id: Optional[str] = None) -> List[Dict[str, str]]:
     svc = _get_service()
     timezone = settings.GOOGLE_CALENDAR_TIMEZONE
     start_rfc3339 = to_google_rfc3339(start_at, timezone)
@@ -139,7 +139,8 @@ def free_busy(start_at: dt.datetime, end_at: dt.datetime) -> List[Dict[str, str]
         return [
             {"start": to_google_rfc3339(event.start_at, timezone), "end": to_google_rfc3339(event.end_at, timezone)}
             for event in CALENDAR_STORE.events.values()
-            if event.status != "cancelled"
+            if event.id != ignore_event_id
+            and event.status != "cancelled"
             and _overlaps(
                 start_aware,
                 end_aware,
@@ -175,7 +176,25 @@ def free_busy(start_at: dt.datetime, end_at: dt.datetime) -> List[Dict[str, str]
         )
         raise
     busy = result.get("calendars", {}).get(settings.GOOGLE_CALENDAR_ID, {}).get("busy", [])
-    return _filter_google_busy_periods(busy)
+    busy = _filter_google_busy_periods(busy)
+    if ignore_event_id:
+        ignored_event = find_event_by_id(ignore_event_id)
+        if ignored_event:
+            try:
+                ignored_start, ignored_end = event_time_from_google(ignored_event)
+                ignored_start_rfc3339 = to_google_rfc3339(ignored_start, timezone)
+                ignored_end_rfc3339 = to_google_rfc3339(ignored_end, timezone)
+                busy = [
+                    period
+                    for period in busy
+                    if not (
+                        period.get("start") == ignored_start_rfc3339
+                        and period.get("end") == ignored_end_rfc3339
+                    )
+                ]
+            except Exception as exc:
+                logger.warning("calendar_freebusy_ignore_event_failed event_id=%s error=%r", ignore_event_id, exc)
+    return busy
 
 
 def build_deterministic_event_id(

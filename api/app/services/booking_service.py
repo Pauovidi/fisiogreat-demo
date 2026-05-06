@@ -46,14 +46,25 @@ def service_duration_minutes(service_type: str) -> int:
     )
 
 
-def propose_slots(preferred: dt.datetime, service_type: str, *, count: int = 6) -> List[Dict[str, Any]]:
+def propose_slots(
+    preferred: dt.datetime,
+    service_type: str,
+    *,
+    count: int = 6,
+    ignore_calendar_event_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     duration = service_duration_minutes(service_type)
     candidates = local_propose_slots(preferred, _normalize_service(service_type), BusinessRules())
     slots: List[Dict[str, Any]] = []
     for candidate in candidates:
         start_at = candidate["start"]
         end_at = start_at + dt.timedelta(minutes=duration)
-        if calendar_service.free_busy(start_at, end_at):
+        busy = (
+            calendar_service.free_busy(start_at, end_at, ignore_event_id=ignore_calendar_event_id)
+            if ignore_calendar_event_id
+            else calendar_service.free_busy(start_at, end_at)
+        )
+        if busy:
             continue
         slots.append({"start": start_at, "end": end_at, "service": service_type})
         if len(slots) >= count:
@@ -260,13 +271,36 @@ async def reschedule_appointment(appointment_id: str, *, new_start_at: dt.dateti
     calendar_event_id = appointment.get("calendar_event_id")
     if not calendar_event_id:
         return BookingResult(False, reason="missing_calendar_event")
+    logger.info(
+        "calendar_update_attempt appointment_id=%s calendar_event_id=%s new_start_at=%s new_end_at=%s",
+        appointment_id,
+        calendar_event_id,
+        new_start_at.isoformat(),
+        new_end_at.isoformat(),
+    )
     try:
         updated_event = calendar_service.update_event(calendar_event_id, start_at=new_start_at, end_at=new_end_at)
     except Exception as exc:
-        logger.warning("calendar_update_failed appointment_id=%s calendar_event_id=%s error=%r", appointment_id, calendar_event_id, exc)
+        logger.warning(
+            "calendar_update_error appointment_id=%s calendar_event_id=%s error=%r",
+            appointment_id,
+            calendar_event_id,
+            exc,
+        )
         return BookingResult(False, reason="calendar_update_failed")
     if not updated_event:
+        logger.warning(
+            "calendar_update_error appointment_id=%s calendar_event_id=%s error=%r",
+            appointment_id,
+            calendar_event_id,
+            "update_returned_false",
+        )
         return BookingResult(False, reason="calendar_update_failed")
+    logger.info(
+        "calendar_update_success appointment_id=%s calendar_event_id=%s",
+        appointment_id,
+        calendar_event_id,
+    )
     updated = await supabase_repo.update_appointment(
         appointment_id,
         start_at=new_start_at.isoformat(),

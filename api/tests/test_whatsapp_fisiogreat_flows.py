@@ -438,12 +438,23 @@ def test_whatsapp_valid_services_are_closed_catalog_and_ask_name_or_reason():
 
 
 def test_whatsapp_unsupported_services_do_not_start_booking():
-    for index, message in enumerate(["quiero pilates", "quiero masaje", "quiero osteopatía"], start=1):
+    cases = [
+        ("quiero pilates", "En esta demo no puedo reservar pilates."),
+        ("quiero masaje", "En esta demo no puedo reservar masaje."),
+        ("quiero osteopatía", "En esta demo no puedo reservar osteopatia."),
+        ("quiero nutrición", "En esta demo no puedo reservar nutricion."),
+        ("quiero podología", "En esta demo no puedo reservar podologia."),
+        ("quiero suelo pélvico", "En esta demo no puedo reservar suelo pelvico."),
+        ("quiero readaptación", "En esta demo no puedo reservar readaptacion."),
+        ("quiero entrenamiento", "En esta demo no puedo reservar entrenamiento."),
+    ]
+    for index, (message, expected_intro) in enumerate(cases, start=1):
         user = f"+346000002{index:02d}"
         reset_state(user)
 
         response = post_whatsapp(user, message)
 
+        assert expected_intro in response.text
         assert "valoración inicial, sesión de fisioterapia y consulta de seguimiento" in response.text
         assert "derivarte a una persona" in response.text.lower()
         assert CTX.get_stage(user) == "idle"
@@ -575,7 +586,14 @@ def test_whatsapp_after_olvida_mi_nombre_asks_name_again():
 
 
 def test_whatsapp_demo_name_clear_command_variants():
-    commands = ["borrar mi nombre", "borrar mis datos", "reiniciar demo"]
+    commands = [
+        "borrar mi nombre",
+        "borrar mis datos",
+        "reiniciar demo",
+        "reset demo",
+        "resetear demo",
+        "demo reset",
+    ]
     for index, command in enumerate(commands, start=1):
         user = f"+3460000004{index}"
         reset_state(user)
@@ -593,6 +611,30 @@ def test_whatsapp_demo_name_clear_command_variants():
         assert response.text.count("he limpiado el nombre guardado") == 1
         assert patient["name"] is None
         assert not STORE.appointments
+
+
+def test_whatsapp_reset_demo_clears_name_and_fisio_flow_asks_reason_then_name():
+    user = "+34600000047"
+    reset_state(user)
+    asyncio.run(
+        supabase_repo.create_patient(
+            clinic_id=settings.DEMO_CLINIC_ID,
+            phone=user,
+            name="Pau Marco",
+        )
+    )
+
+    response = post_whatsapp(user, "reset demo")
+    patient = next(item for item in STORE.patients.values() if item["phone"] == user)
+    service = post_whatsapp(user, "quiero sesión de fisio")
+    assert CTX.get_stage(user) == "awaiting_consultation_reason"
+    reason = post_whatsapp(user, "me duele la rodilla")
+
+    assert "he limpiado el nombre guardado" in response.text.lower()
+    assert patient["name"] is None
+    assert "motivo" in service.text.lower()
+    assert "nombre" in reason.text.lower()
+    assert CTX.get_stage(user) == "awaiting_patient_name"
 
 
 def test_whatsapp_reset_prevents_old_slot_selection():
@@ -774,6 +816,77 @@ def test_whatsapp_reschedule_calendar_failure_keeps_original():
     assert STORE.appointments[appointment["id"]]["start_at"] == original_start
     assert STORE.appointments[appointment["id"]]["calendar_event_id"] == original_event
     assert STORE.appointments[appointment["id"]]["status"] == "confirmed"
+
+
+def test_whatsapp_reschedule_same_day_other_time_uses_original_date_and_updates_existing():
+    user = "+34600000059"
+    reset_state(user)
+    appointment = create_future_appointment(user, "valoracion inicial", dt.datetime(2026, 5, 7, 10, 0))
+    original_start = appointment["start_at"]
+    original_event_id = appointment["calendar_event_id"]
+
+    post_whatsapp(user, "quiero cambiar mi cita")
+    post_whatsapp(user, "sí")
+    offered = post_whatsapp(user, "el mismo día a otra hora")
+    offered_slots = CTX.get(user)["offered_slots"]
+
+    assert "ese mismo día" in offered.text.lower()
+    assert CTX.get(user)["date_pref"] == dt.date(2026, 5, 7)
+    assert offered_slots
+    assert all("jueves 07/05" in slot for slot in offered_slots)
+    assert "jueves 07/05 a las 10:00" not in offered_slots
+
+    changed = post_whatsapp(user, "1")
+
+    assert "he cambiado tu cita" in changed.text.lower()
+    assert len(STORE.appointments) == 1
+    assert STORE.appointments[appointment["id"]]["start_at"] != original_start
+    assert STORE.appointments[appointment["id"]]["calendar_event_id"] == original_event_id
+    assert original_event_id in CALENDAR_STORE.events
+
+
+def test_whatsapp_reschedule_thursday_parses_target_date():
+    user = "+34600000060"
+    reset_state(user)
+    create_future_appointment(user, "valoracion inicial", dt.datetime(2026, 5, 8, 10, 0))
+
+    post_whatsapp(user, "quiero cambiar mi cita")
+    post_whatsapp(user, "sí")
+    offered = post_whatsapp(user, "jueves")
+
+    assert "te puedo ofrecer" in offered.text.lower()
+    assert CTX.get(user)["date_pref"] == dt.date(2026, 5, 7)
+    assert all("jueves 07/05" in slot for slot in CTX.get(user)["offered_slots"])
+
+
+def test_whatsapp_reschedule_unparsed_day_asks_clarification_not_no_slots():
+    user = "+34600000061"
+    reset_state(user)
+    create_future_appointment(user, "valoracion inicial", dt.datetime(2026, 5, 7, 10, 0))
+
+    post_whatsapp(user, "quiero cambiar mi cita")
+    post_whatsapp(user, "sí")
+    response = post_whatsapp(user, "cuando puedas")
+
+    assert "dime el nuevo día" in response.text.lower()
+    assert "no veo huecos" not in response.text.lower()
+    assert CTX.get_stage(user) == "awaiting_reschedule_date"
+
+
+def test_whatsapp_reset_clears_pending_reschedule_selection():
+    user = "+34600000062"
+    reset_state(user)
+    create_future_appointment(user, "valoracion inicial", dt.datetime(2026, 5, 7, 10, 0))
+    create_future_appointment(user, "consulta de seguimiento", dt.datetime(2026, 5, 8, 10, 0))
+
+    post_whatsapp(user, "quiero cambiar mi cita")
+    assert CTX.get(user)["pending_reschedule_appointments"]
+
+    post_whatsapp(user, "reiniciar")
+
+    assert CTX.get_stage(user) == "idle"
+    assert CTX.get(user)["pending_reschedule_appointments"] == []
+    assert len(STORE.appointments) == 2
 
 
 def test_whatsapp_cancel_zero_one_multiple_and_calendar_failure():

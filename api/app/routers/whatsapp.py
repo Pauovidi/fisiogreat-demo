@@ -28,6 +28,7 @@ from ..utils.mini_context import CTX
 from ..utils.patient_name import first_name, parse_patient_name
 from ..utils.appointment_options import (
     format_appointment_option_whatsapp,
+    parse_appointment_start,
     pick_appointment_option,
 )
 from ..utils.slot_picker import pick_slot
@@ -85,12 +86,25 @@ def _dummy_slot_labels(date_pref: dt.date, time_pref: Optional[str], count: int)
     return [_format_slot_label(dt.datetime.combine(date_pref, value)) for value in times[:count]]
 
 
-def _build_slot_labels(service: str, date_pref: dt.date, time_pref: Optional[str], count: int = 6) -> List[str]:
+def _build_slot_labels(
+    service: str,
+    date_pref: dt.date,
+    time_pref: Optional[str],
+    count: int = 6,
+    *,
+    preferred_dt: Optional[dt.datetime] = None,
+    ignore_calendar_event_id: Optional[str] = None,
+    allow_dummy_fallback: bool = True,
+) -> List[str]:
     preferred_hour = 11 if time_pref == "morning" else 16 if time_pref == "afternoon" else 12
-    preferred_dt = dt.datetime.combine(date_pref, dt.time(preferred_hour, 0))
+    preferred_dt = preferred_dt or dt.datetime.combine(date_pref, dt.time(preferred_hour, 0))
 
     try:
-        raw_slots = booking_propose_slots(preferred_dt, service)
+        raw_slots = booking_propose_slots(
+            preferred_dt,
+            service,
+            ignore_calendar_event_id=ignore_calendar_event_id,
+        )
     except Exception as exc:
         logger.warning(f"WA slot generation fallback for {service}: {exc}")
         if settings.USE_REAL_CALENDAR:
@@ -100,7 +114,7 @@ def _build_slot_labels(service: str, date_pref: dt.date, time_pref: Optional[str
     labels: List[str] = []
     for slot in raw_slots:
         start = slot["start"]
-        if start.date() < date_pref:
+        if start.date() != date_pref:
             continue
         if time_pref == "morning" and start.hour >= 15:
             continue
@@ -113,7 +127,7 @@ def _build_slot_labels(service: str, date_pref: dt.date, time_pref: Optional[str
             break
 
     if not labels:
-        if settings.USE_REAL_CALENDAR:
+        if settings.USE_REAL_CALENDAR or not allow_dummy_fallback:
             return []
         return _dummy_slot_labels(date_pref, time_pref, count)
     return labels
@@ -176,6 +190,9 @@ DEMO_NAME_CLEAR_COMMANDS = {
     "borrar mi nombre",
     "borrar mis datos",
     "reiniciar demo",
+    "reset demo",
+    "resetear demo",
+    "demo reset",
 }
 
 PENDING_FLOW_STAGES = {
@@ -362,6 +379,77 @@ def _selected_appointment(key: str, *, action: str) -> Optional[dict]:
     return None
 
 
+def _is_same_day_reschedule_request(body: str) -> bool:
+    normalized = normalize_text(body)
+    return any(
+        phrase in normalized
+        for phrase in {
+            "el mismo dia",
+            "mismo dia",
+            "otra hora ese dia",
+            "ese mismo dia",
+            "mas tarde ese dia",
+            "antes ese dia",
+            "el mismo dia a otra hora",
+        }
+    )
+
+
+def _parse_reschedule_target_date(body: str, appointment: dict) -> tuple[Optional[dt.date], bool]:
+    if _is_same_day_reschedule_request(body):
+        original_start = parse_appointment_start(appointment)
+        return (original_start.date() if original_start else None), True
+
+    normalized = normalize_text(body)
+    if "semana que viene" in normalized and not any(day in normalized for day in ["lunes", "martes", "miercoles", "jueves", "viernes", "sabado", "domingo"]):
+        today = dt.date.today()
+        days_until_next_monday = (7 - today.weekday()) % 7 or 7
+        return today + dt.timedelta(days=days_until_next_monday), False
+
+    return parse_spanish_day(body), False
+
+
+def _preferred_reschedule_datetime(
+    target_date: dt.date,
+    time_pref: Optional[str],
+    body: str,
+    appointment: dict,
+    *,
+    same_day: bool,
+) -> dt.datetime:
+    if same_day:
+        original_start = parse_appointment_start(appointment)
+        if original_start:
+            normalized = normalize_text(body)
+            if "antes" in normalized:
+                preferred = original_start - dt.timedelta(hours=1)
+            elif "mas tarde" in normalized or "tarde" in normalized:
+                preferred = original_start + dt.timedelta(hours=1)
+            else:
+                preferred = original_start + dt.timedelta(hours=1)
+            return preferred.replace(tzinfo=None)
+    preferred_hour = 11 if time_pref == "morning" else 16 if time_pref == "afternoon" else 12
+    return dt.datetime.combine(target_date, dt.time(preferred_hour, 0))
+
+
+def _without_original_slot(labels: List[str], appointment: dict) -> List[str]:
+    original_start = parse_appointment_start(appointment)
+    if not original_start:
+        return labels
+    original_label = _format_slot_label(original_start.replace(tzinfo=None))
+    return [label for label in labels if label != original_label]
+
+
+def _propose_reschedule_slots(slots: List[str], *, same_day: bool) -> str:
+    if not slots:
+        return "Ese día no veo huecos libres. ¿Quieres que miremos otro día?"
+    lines = ["Te puedo ofrecer estas opciones para ese mismo día:" if same_day else "Te puedo ofrecer estas opciones:"]
+    for index, slot in enumerate(slots, start=1):
+        lines.append(f"{index}. {slot}")
+    lines.append("Si te encaja una, dime el número.")
+    return "\n".join(lines)
+
+
 async def _cancel_selected_appointment(key: str, appointment: dict) -> str:
     result = await cancel_appointment(appointment.get("id"))
     if not result.ok:
@@ -380,25 +468,59 @@ def _ask_new_day_for_selected(key: str, appointment: dict) -> str:
     CTX.set_selected_appointment(key, appointment)
     CTX.set_service(key, appointment.get("service_type"))
     CTX.set_stage(key, "awaiting_reschedule_date")
+    logger.info(
+        "reschedule_selected_appointment_id=%s reschedule_original_start_at=%s",
+        appointment.get("id"),
+        appointment.get("start_at"),
+    )
     return "Perfecto. ¿Qué nuevo día te viene bien?"
 
 
 async def _offer_reschedule_slots(key: str, body: str) -> str:
-    parsed_date = parse_spanish_day(body)
-    if not parsed_date:
-        return "Dime el nuevo día, por ejemplo mañana o jueves."
-    time_pref = parse_time_pref(body)
     appointment = _selected_appointment(key, action="reschedule")
     if not appointment:
         CTX.clear_flow(key)
         return "No he podido identificar la cita que quieres cambiar. Empezamos de nuevo si te parece."
+    parsed_date, same_day = _parse_reschedule_target_date(body, appointment)
+    logger.info(
+        "reschedule_requested_day_raw=%r reschedule_target_date=%s",
+        body,
+        parsed_date.isoformat() if parsed_date else None,
+    )
+    if not parsed_date:
+        return "Dime el nuevo día, por ejemplo mañana, jueves o viernes."
+    time_pref = parse_time_pref(body)
     service = appointment.get("service_type") or "sesion de fisioterapia"
+    preferred_dt = _preferred_reschedule_datetime(
+        parsed_date,
+        time_pref,
+        body,
+        appointment,
+        same_day=same_day,
+    )
+    slots = _build_slot_labels(
+        service,
+        parsed_date,
+        time_pref,
+        preferred_dt=preferred_dt,
+        ignore_calendar_event_id=appointment.get("calendar_event_id"),
+        allow_dummy_fallback=False,
+    )
+    slots = _without_original_slot(slots, appointment)
+    logger.info(
+        "reschedule_slots_found_count=%s reschedule_selected_appointment_id=%s",
+        len(slots),
+        appointment.get("id"),
+    )
     CTX.set_date(key, parsed_date)
     CTX.set_time_pref(key, time_pref)
     CTX.set_service(key, service)
-    CTX.set_slots(key, _build_slot_labels(service, parsed_date, time_pref))
+    CTX.set_slots(key, slots)
+    if not slots:
+        CTX.set_stage(key, "awaiting_reschedule_date")
+        return _propose_reschedule_slots([], same_day=same_day)
     CTX.set_stage(key, "offering_reschedule_slots")
-    return copy.propose_slots(CTX.next_slots(key, WA_PAGE_SIZE))
+    return _propose_reschedule_slots(CTX.next_slots(key, WA_PAGE_SIZE), same_day=same_day)
 
 
 async def _confirm_reschedule_slot(key: str, body: str) -> str:
@@ -493,7 +615,7 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
 
             route_peek = route_message(body)
             if route_peek["type"] == "unsupported_service":
-                return _twiml(copy.unsupported_service())
+                return _twiml(copy.unsupported_service(route_peek.get("service")))
             if not _is_state_interrupt(route_peek["type"]):
                 return _twiml(copy.ask_service_retry())
 
@@ -521,7 +643,7 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
             if route_peek["type"] == "pick_slot":
                 return _twiml(copy.ask_patient_name_before_confirmation())
             if route_peek["type"] == "unsupported_service":
-                return _twiml(copy.unsupported_service())
+                return _twiml(copy.unsupported_service(route_peek.get("service")))
             patient_name = parse_patient_name(body)
             if not patient_name:
                 return _twiml("No he entendido bien el nombre. ¿A qué nombre dejamos la cita?")
@@ -557,7 +679,7 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
 
             route_peek = route_message(body)
             if route_peek["type"] == "unsupported_service":
-                return _twiml(copy.unsupported_service())
+                return _twiml(copy.unsupported_service(route_peek.get("service")))
             if not _is_state_interrupt(route_peek["type"]):
                 return _twiml(copy.ask_date_retry())
 
@@ -618,7 +740,7 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
 
             route_peek = route_message(body)
             if route_peek["type"] == "unsupported_service":
-                return _twiml(copy.unsupported_service())
+                return _twiml(copy.unsupported_service(route_peek.get("service")))
             if route_peek["type"] == "more_options":
                 next_batch = CTX.next_slots(wa_from, WA_PAGE_SIZE)
                 if next_batch:
@@ -694,7 +816,7 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
             return _twiml(copy.ask_service())
 
         if route_type == "unsupported_service":
-            return _twiml(copy.unsupported_service())
+            return _twiml(copy.unsupported_service(route.get("service")))
 
         if route_type == "faq":
             return _twiml(_faq_with_reengagement(wa_from, route.get("faq_id", "hours")))
