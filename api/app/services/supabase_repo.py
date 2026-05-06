@@ -1,7 +1,7 @@
 import datetime as dt
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 import httpx
 
@@ -188,6 +188,95 @@ async def update_appointment(appointment_id: str, **updates: Any) -> Dict[str, A
 
 async def cancel_appointment(appointment_id: str) -> Dict[str, Any]:
     return await update_appointment(appointment_id, status="cancelled", cancelled_at=_now())
+
+
+async def get_appointment(appointment_id: str) -> Optional[Dict[str, Any]]:
+    if appointment_id in STORE.appointments:
+        return STORE.appointments[appointment_id]
+    if supabase_configured():
+        rows = await _select("appointments", {"id": f"eq.{appointment_id}"})
+        return rows[0] if rows else None
+    return None
+
+
+async def list_future_appointments_for_patient(
+    *,
+    clinic_id: str,
+    patient_key: str,
+    now: Optional[dt.datetime] = None,
+    statuses: Sequence[str] = ("confirmed", "scheduled"),
+) -> List[Dict[str, Any]]:
+    now = now or dt.datetime.now()
+    patient_ids = {
+        patient.get("id")
+        for patient in STORE.patients.values()
+        if patient.get("clinic_id") == clinic_id and patient.get("phone") == patient_key
+    }
+
+    if supabase_configured():
+        rows: List[Dict[str, Any]] = []
+        filters = {
+            "clinic_id": f"eq.{clinic_id}",
+            "external_user_id": f"eq.{patient_key}",
+            "status": f"in.({','.join(statuses)})",
+            "start_at": f"gte.{now.isoformat()}",
+            "order": "start_at.asc",
+        }
+        rows.extend(await _select("appointments", filters, limit=100))
+        patients = await _select("patients", {"clinic_id": f"eq.{clinic_id}", "phone": f"eq.{patient_key}"}, limit=20)
+        for patient in patients:
+            patient_id = patient.get("id")
+            if not patient_id:
+                continue
+            patient_rows = await _select(
+                "appointments",
+                {
+                    "clinic_id": f"eq.{clinic_id}",
+                    "patient_id": f"eq.{patient_id}",
+                    "status": f"in.({','.join(statuses)})",
+                    "start_at": f"gte.{now.isoformat()}",
+                    "order": "start_at.asc",
+                },
+                limit=100,
+            )
+            rows.extend(patient_rows)
+        deduped = {row.get("id"): row for row in rows if row.get("id")}
+        return sorted(deduped.values(), key=lambda item: item.get("start_at") or "")
+
+    appointments = []
+    for appointment in STORE.appointments.values():
+        if appointment.get("clinic_id") != clinic_id:
+            continue
+        if appointment.get("status") not in statuses:
+            continue
+        if appointment.get("external_user_id") != patient_key and appointment.get("patient_id") not in patient_ids:
+            continue
+        start_at = _parse_datetime(appointment.get("start_at"))
+        if not start_at:
+            continue
+        comparable_now = _coerce_now_for(start_at, now)
+        if start_at >= comparable_now:
+            appointments.append(appointment)
+    return sorted(appointments, key=lambda item: item.get("start_at") or "")
+
+
+def _parse_datetime(value: Any) -> Optional[dt.datetime]:
+    if isinstance(value, dt.datetime):
+        return value
+    if not value:
+        return None
+    try:
+        return dt.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _coerce_now_for(value: dt.datetime, now: dt.datetime) -> dt.datetime:
+    if value.tzinfo and not now.tzinfo:
+        return now.replace(tzinfo=dt.timezone.utc)
+    if now.tzinfo and not value.tzinfo:
+        return now.replace(tzinfo=None)
+    return now
 
 
 async def create_conversation_session(**payload: Any) -> Dict[str, Any]:

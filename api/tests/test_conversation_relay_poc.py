@@ -1,9 +1,12 @@
 import xml.etree.ElementTree as ET
+import datetime as dt
+import asyncio
 
 from fastapi.testclient import TestClient
 
 from app.config.settings import settings
 from app.main import app
+from app.services.booking_service import confirm_slot
 from app.services.calendar_service import CALENDAR_STORE
 from app.services.supabase_repo import STORE
 from app.utils.mini_context import CTX
@@ -20,6 +23,21 @@ def reset_state(key: str):
     STORE.reset()
     CALENDAR_STORE.reset()
     CTX.clear(key)
+
+
+def create_voice_appointment(call_sid: str, service: str, start: dt.datetime):
+    result = asyncio.run(confirm_slot(
+        channel="voice",
+        external_user_id=call_sid,
+        service_type=service,
+        start_at=start,
+        patient_name="Pau Marco",
+        contact_email="pau@example.com",
+        consultation_reason="rodilla" if "fisio" in service or "fisioterapia" in service else None,
+        metadata={"transport": "conversationrelay"},
+    ))
+    assert result.ok
+    return result.appointment
 
 
 def test_conversationrelay_twiml_exposes_websocket_without_cloud_run_coupling():
@@ -135,3 +153,40 @@ def test_conversationrelay_emergency_cuts_flow():
         assert response["last"] is True
         assert "112" in response["token"]
         assert not STORE.appointments
+
+
+def test_conversationrelay_lists_and_selects_multiple_reschedule_options():
+    call_sid = "CA-conversationrelay-reschedule-multiple"
+    reset_state(call_sid)
+    first = create_voice_appointment(call_sid, "sesion de fisioterapia", dt.datetime(2026, 5, 7, 10, 0))
+    second = create_voice_appointment(call_sid, "valoracion inicial", dt.datetime(2026, 5, 8, 10, 0))
+
+    with client.websocket_connect("/webhook/voice/conversationrelay/ws") as websocket:
+        websocket.send_json({"type": "setup", "sessionId": "VX-reschedule-many", "callSid": call_sid})
+        websocket.receive_json()
+        websocket.send_json({"type": "prompt", "voicePrompt": "quiero cambiar mi cita", "last": True})
+        listed = websocket.receive_json()
+        assert listed["type"] == "text"
+        assert listed["last"] is True
+        assert "varias citas futuras" in listed["token"].lower()
+
+        websocket.send_json({"type": "prompt", "voicePrompt": "la segunda", "last": True})
+        selected = websocket.receive_json()
+        assert selected["type"] == "text"
+        assert selected["last"] is True
+        assert "nuevo dia" in selected["token"].lower()
+
+        websocket.send_json({"type": "prompt", "voicePrompt": "viernes", "last": True})
+        offer = websocket.receive_json()
+        assert offer["type"] == "text"
+        assert offer["last"] is True
+        assert "tengo" in offer["token"].lower()
+
+        websocket.send_json({"type": "prompt", "voicePrompt": "primera", "last": True})
+        changed = websocket.receive_json()
+
+    assert changed["type"] == "text"
+    assert changed["last"] is True
+    assert "he cambiado tu cita" in changed["token"].lower()
+    assert STORE.appointments[first["id"]]["start_at"].startswith("2026-05-07")
+    assert STORE.appointments[second["id"]]["status"] == "confirmed"

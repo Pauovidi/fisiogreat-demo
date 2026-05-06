@@ -5,7 +5,14 @@ from googleapiclient.errors import HttpError
 
 from app.config.settings import settings
 from app.services import supabase_repo
-from app.services.booking_service import confirm_slot, get_appointment_status, propose_slots
+from app.services.booking_service import (
+    cancel_appointment,
+    confirm_slot,
+    get_appointment_status,
+    list_future_appointments,
+    propose_slots,
+    reschedule_appointment,
+)
 from app.services.calendar_service import CALENDAR_STORE
 from app.services.supabase_repo import STORE
 
@@ -309,3 +316,133 @@ def test_booking_service_proposes_slots_without_secrets():
     slots = propose_slots(dt.datetime(2026, 5, 4, 10, 0), "sesion de fisioterapia")
     assert slots
     assert slots[0]["service"] == "sesion de fisioterapia"
+
+
+def test_list_future_appointments_filters_patient_status_past_and_calendar_event():
+    STORE.reset()
+    CALENDAR_STORE.reset()
+    user = "+34600001000"
+    patient = asyncio.run(supabase_repo.create_patient(clinic_id=settings.DEMO_CLINIC_ID, phone=user, name="Pau Marco"))
+    future = dt.datetime(2026, 5, 7, 10, 0)
+    past = dt.datetime(2026, 5, 5, 10, 0)
+
+    asyncio.run(supabase_repo.create_appointment(
+        clinic_id=settings.DEMO_CLINIC_ID,
+        patient_id=patient["id"],
+        service_type="sesion de fisioterapia",
+        start_at=future.isoformat(),
+        end_at=(future + dt.timedelta(minutes=45)).isoformat(),
+        status="confirmed",
+        calendar_event_id="future-event",
+        external_user_id=user,
+    ))
+    asyncio.run(supabase_repo.create_appointment(
+        clinic_id=settings.DEMO_CLINIC_ID,
+        patient_id=patient["id"],
+        service_type="valoracion inicial",
+        start_at=(future + dt.timedelta(hours=1)).isoformat(),
+        end_at=(future + dt.timedelta(hours=2)).isoformat(),
+        status="cancelled",
+        calendar_event_id="cancelled-event",
+        external_user_id=user,
+    ))
+    asyncio.run(supabase_repo.create_appointment(
+        clinic_id=settings.DEMO_CLINIC_ID,
+        patient_id=patient["id"],
+        service_type="consulta de seguimiento",
+        start_at=past.isoformat(),
+        end_at=(past + dt.timedelta(minutes=30)).isoformat(),
+        status="confirmed",
+        calendar_event_id="past-event",
+        external_user_id=user,
+    ))
+    asyncio.run(supabase_repo.create_appointment(
+        clinic_id=settings.DEMO_CLINIC_ID,
+        patient_id=patient["id"],
+        service_type="valoracion inicial",
+        start_at=(future + dt.timedelta(hours=2)).isoformat(),
+        end_at=(future + dt.timedelta(hours=3)).isoformat(),
+        status="confirmed",
+        external_user_id=user,
+    ))
+
+    appointments = asyncio.run(list_future_appointments(patient_key=user))
+
+    assert [appointment["calendar_event_id"] for appointment in appointments] == ["future-event"]
+
+
+def test_reschedule_updates_calendar_before_supabase_and_preserves_confirmed_status(monkeypatch):
+    STORE.reset()
+    CALENDAR_STORE.reset()
+    start = dt.datetime(2026, 5, 7, 10, 0)
+    result = asyncio.run(confirm_slot(
+        channel="whatsapp",
+        external_user_id="+34600001001",
+        service_type="sesion de fisioterapia",
+        start_at=start,
+        patient_name="Pau Marco",
+        consultation_reason="me duele la rodilla",
+    ))
+    appointment_id = result.appointment["id"]
+    original_event_id = result.appointment["calendar_event_id"]
+    new_start = dt.datetime(2026, 5, 8, 10, 15)
+
+    changed = asyncio.run(reschedule_appointment(
+        appointment_id,
+        new_start_at=new_start,
+        new_end_at=new_start + dt.timedelta(minutes=45),
+    ))
+
+    assert changed.ok
+    appointment = STORE.appointments[appointment_id]
+    assert appointment["status"] == "confirmed"
+    assert appointment["calendar_event_id"] == original_event_id
+    assert appointment["metadata"]["consultation_reason"] == "me duele la rodilla"
+    assert CALENDAR_STORE.events[original_event_id].start_at.replace(tzinfo=None) == new_start
+
+
+def test_reschedule_calendar_failure_keeps_supabase_original(monkeypatch):
+    STORE.reset()
+    CALENDAR_STORE.reset()
+    start = dt.datetime(2026, 5, 7, 10, 0)
+    result = asyncio.run(confirm_slot(
+        channel="whatsapp",
+        external_user_id="+34600001002",
+        service_type="valoracion inicial",
+        start_at=start,
+        patient_name="Pau Marco",
+    ))
+    appointment_id = result.appointment["id"]
+    monkeypatch.setattr("app.services.booking_service.calendar_service.update_event", lambda *_args, **_kwargs: False)
+
+    changed = asyncio.run(reschedule_appointment(
+        appointment_id,
+        new_start_at=dt.datetime(2026, 5, 8, 10, 15),
+        new_end_at=dt.datetime(2026, 5, 8, 11, 15),
+    ))
+
+    assert not changed.ok
+    assert changed.reason == "calendar_update_failed"
+    assert STORE.appointments[appointment_id]["start_at"] == start.isoformat()
+    assert STORE.appointments[appointment_id]["status"] == "confirmed"
+
+
+def test_cancel_calendar_failure_keeps_supabase_confirmed(monkeypatch):
+    STORE.reset()
+    CALENDAR_STORE.reset()
+    start = dt.datetime(2026, 5, 7, 10, 0)
+    result = asyncio.run(confirm_slot(
+        channel="whatsapp",
+        external_user_id="+34600001003",
+        service_type="valoracion inicial",
+        start_at=start,
+        patient_name="Pau Marco",
+    ))
+    appointment_id = result.appointment["id"]
+    monkeypatch.setattr("app.services.booking_service.calendar_service.delete_event", lambda *_args, **_kwargs: False)
+
+    cancelled = asyncio.run(cancel_appointment(appointment_id))
+
+    assert not cancelled.ok
+    assert cancelled.reason == "calendar_delete_failed"
+    assert STORE.appointments[appointment_id]["status"] == "confirmed"

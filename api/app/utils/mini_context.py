@@ -21,6 +21,12 @@ class MiniContext:
             "contact_channel_preference": None,
             "suggested_contact_phone": None,
             "pending_slot": None,
+            "pending_reschedule_appointments": [],
+            "pending_cancel_appointments": [],
+            "selected_appointment_id": None,
+            "selected_calendar_event_id": None,
+            "selected_original_start_at": None,
+            "selected_original_service_type": None,
             "patient_name": None,
             "patient_name_source": None,
             "offered_slots": [],
@@ -99,6 +105,28 @@ class MiniContext:
     def set_pending_slot(self, key: str, slot: Optional[str]):
         entry = self._touch(key)
         entry["pending_slot"] = slot
+
+    def set_pending_appointments(self, key: str, *, action: str, appointments: List[Dict[str, Any]]):
+        entry = self._touch(key)
+        field = "pending_cancel_appointments" if action == "cancel" else "pending_reschedule_appointments"
+        entry[field] = list(appointments)
+        if action == "cancel":
+            entry["pending_reschedule_appointments"] = []
+        else:
+            entry["pending_cancel_appointments"] = []
+
+    def set_selected_appointment(self, key: str, appointment: Optional[Dict[str, Any]]):
+        entry = self._touch(key)
+        if not appointment:
+            entry["selected_appointment_id"] = None
+            entry["selected_calendar_event_id"] = None
+            entry["selected_original_start_at"] = None
+            entry["selected_original_service_type"] = None
+            return
+        entry["selected_appointment_id"] = appointment.get("id")
+        entry["selected_calendar_event_id"] = appointment.get("calendar_event_id")
+        entry["selected_original_start_at"] = appointment.get("start_at")
+        entry["selected_original_service_type"] = appointment.get("service_type")
 
     def set_patient_name(self, key: str, patient_name: Optional[str], source: Optional[str] = None):
         entry = self._touch(key)

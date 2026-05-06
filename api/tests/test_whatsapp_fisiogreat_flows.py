@@ -1,11 +1,34 @@
 import asyncio
+import datetime as dt
 
 from test_demo_flows import post_whatsapp, reset_state
 from app.config.settings import settings
 from app.services import supabase_repo
+from app.services.booking_service import confirm_slot
 from app.services.calendar_service import CALENDAR_STORE
 from app.services.supabase_repo import STORE
 from app.utils.mini_context import CTX
+
+
+def create_future_appointment(
+    user: str,
+    service: str,
+    start,
+    *,
+    patient_name: str = "Pau Marco",
+    consultation_reason: str | None = None,
+):
+    result = asyncio.run(confirm_slot(
+        channel="whatsapp",
+        external_user_id=user,
+        service_type=service,
+        start_at=start,
+        patient_name=patient_name,
+        consultation_reason=consultation_reason,
+        contact_phone=user,
+    ))
+    assert result.ok
+    return result.appointment
 
 
 def test_whatsapp_fisiogreat_create_flow():
@@ -495,6 +518,8 @@ def test_whatsapp_reset_clears_state_and_slots():
     assert CTX.get_stage(user) == "idle"
     assert CTX.get(user)["offered_slots"] == []
     assert CTX.get(user)["consultation_reason"] is None
+    assert CTX.get(user)["pending_reschedule_appointments"] == []
+    assert CTX.get(user)["pending_cancel_appointments"] == []
 
 
 def test_whatsapp_reiniciar_keeps_saved_patient_name():
@@ -627,8 +652,8 @@ def test_whatsapp_cancelar_cita_is_real_cancellation_flow_not_reset():
 
     response = post_whatsapp(user, "cancelar cita")
 
-    assert "para cancelar una cita" in response.text.lower()
-    assert CTX.get_stage(user) == "awaiting_cancel_date"
+    assert "no encuentro citas futuras" in response.text.lower()
+    assert CTX.get_stage(user) == "idle"
 
 
 def test_whatsapp_cancelar_inside_pending_booking_cancels_only_flow():
@@ -642,3 +667,157 @@ def test_whatsapp_cancelar_inside_pending_booking_cancels_only_flow():
     assert "cancelo esta gestión" in response.text
     assert CTX.get_stage(user) == "idle"
     assert not STORE.appointments
+
+
+def test_whatsapp_reschedule_zero_future_appointments():
+    user = "+34600000050"
+    reset_state(user)
+
+    response = post_whatsapp(user, "quiero cambiar mi cita")
+
+    assert "no encuentro citas futuras" in response.text.lower()
+    assert "pedir una nueva cita" in response.text.lower()
+    assert CTX.get_stage(user) == "idle"
+
+
+def test_whatsapp_reschedule_one_future_appointment_requires_confirmation_then_offers_slots():
+    user = "+34600000051"
+    reset_state(user)
+    create_future_appointment(user, "valoracion inicial", dt.datetime(2026, 5, 7, 10, 0))
+
+    found = post_whatsapp(user, "modificar cita")
+    assert "he encontrado tu cita" in found.text.lower()
+    assert "quieres cambiar" in found.text.lower()
+    assert CTX.get_stage(user) == "awaiting_reschedule_confirmation"
+
+    ask_day = post_whatsapp(user, "sí")
+    assert "nuevo día" in ask_day.text.lower()
+    assert CTX.get_stage(user) == "awaiting_reschedule_date"
+
+    offered = post_whatsapp(user, "viernes")
+    assert "te puedo ofrecer" in offered.text.lower()
+    assert CTX.get_stage(user) == "offering_reschedule_slots"
+
+
+def test_whatsapp_reschedule_multiple_lists_and_selection_updates_only_selected():
+    import datetime as dt
+
+    user = "+34600000052"
+    reset_state(user)
+    first = create_future_appointment(user, "sesion de fisioterapia", dt.datetime(2026, 5, 7, 10, 0), consultation_reason="rodilla")
+    second = create_future_appointment(user, "sesion de fisioterapia", dt.datetime(2026, 5, 7, 11, 0), consultation_reason="espalda")
+    third = create_future_appointment(user, "valoracion inicial", dt.datetime(2026, 5, 8, 10, 0))
+    original_first_start = first["start_at"]
+    original_second_start = second["start_at"]
+    original_event_id = second["calendar_event_id"]
+
+    listed = post_whatsapp(user, "quiero cambiar mi cita")
+    assert "1. sesión de fisioterapia" in listed.text.lower()
+    assert "2. sesión de fisioterapia" in listed.text.lower()
+    assert "3. valoración inicial" in listed.text.lower()
+    assert CTX.get_stage(user) == "awaiting_reschedule_selection"
+
+    selected = post_whatsapp(user, "quiero cambiar la 2")
+    assert "nuevo día" in selected.text.lower()
+    assert CTX.get(user)["selected_appointment_id"] == second["id"]
+
+    post_whatsapp(user, "viernes")
+    changed = post_whatsapp(user, "1")
+
+    assert "he cambiado tu cita" in changed.text.lower()
+    assert len(STORE.appointments) == 3
+    assert STORE.appointments[first["id"]]["start_at"] == original_first_start
+    assert STORE.appointments[second["id"]]["start_at"] != original_second_start
+    assert STORE.appointments[second["id"]]["calendar_event_id"] == original_event_id
+    assert STORE.appointments[second["id"]]["metadata"]["consultation_reason"] == "espalda"
+    assert STORE.appointments[third["id"]]["status"] == "confirmed"
+
+
+def test_whatsapp_reschedule_selects_unique_service_naturally():
+    import datetime as dt
+
+    user = "+34600000053"
+    reset_state(user)
+    create_future_appointment(user, "sesion de fisioterapia", dt.datetime(2026, 5, 7, 10, 0), consultation_reason="rodilla")
+    valuation = create_future_appointment(user, "valoracion inicial", dt.datetime(2026, 5, 8, 10, 0))
+
+    post_whatsapp(user, "reprogramar cita")
+    response = post_whatsapp(user, "la valoración")
+
+    assert "nuevo día" in response.text.lower()
+    assert CTX.get(user)["selected_appointment_id"] == valuation["id"]
+
+
+def test_whatsapp_reschedule_calendar_failure_keeps_original():
+    import datetime as dt
+
+    user = "+34600000054"
+    reset_state(user)
+    appointment = create_future_appointment(user, "valoracion inicial", dt.datetime(2026, 5, 7, 10, 0))
+    original_start = appointment["start_at"]
+    original_event = appointment["calendar_event_id"]
+
+    post_whatsapp(user, "cambiar hora")
+    post_whatsapp(user, "sí")
+    post_whatsapp(user, "viernes")
+
+    from app.services import booking_service
+
+    previous_update = booking_service.calendar_service.update_event
+    booking_service.calendar_service.update_event = lambda *_args, **_kwargs: False
+    try:
+        response = post_whatsapp(user, "1")
+    finally:
+        booking_service.calendar_service.update_event = previous_update
+
+    assert "tu cita original sigue igual" in response.text.lower()
+    assert STORE.appointments[appointment["id"]]["start_at"] == original_start
+    assert STORE.appointments[appointment["id"]]["calendar_event_id"] == original_event
+    assert STORE.appointments[appointment["id"]]["status"] == "confirmed"
+
+
+def test_whatsapp_cancel_zero_one_multiple_and_calendar_failure():
+    import datetime as dt
+
+    user_zero = "+34600000055"
+    reset_state(user_zero)
+    zero = post_whatsapp(user_zero, "quiero cancelar mi cita")
+    assert "no encuentro citas futuras" in zero.text.lower()
+
+    user_one = "+34600000056"
+    reset_state(user_one)
+    only = create_future_appointment(user_one, "valoracion inicial", dt.datetime(2026, 5, 7, 10, 0))
+    found = post_whatsapp(user_one, "cancelar cita")
+    assert "quieres cancelarla" in found.text.lower()
+    cancelled = post_whatsapp(user_one, "sí")
+    assert "he cancelado tu cita" in cancelled.text.lower()
+    assert STORE.appointments[only["id"]]["status"] == "cancelled"
+    assert CALENDAR_STORE.events[only["calendar_event_id"]].status == "cancelled"
+
+    user_many = "+34600000057"
+    reset_state(user_many)
+    first = create_future_appointment(user_many, "sesion de fisioterapia", dt.datetime(2026, 5, 7, 10, 0), consultation_reason="rodilla")
+    second = create_future_appointment(user_many, "valoracion inicial", dt.datetime(2026, 5, 8, 10, 0))
+    listed = post_whatsapp(user_many, "anular cita")
+    assert "1. sesión de fisioterapia" in listed.text.lower()
+    assert "2. valoración inicial" in listed.text.lower()
+    cancelled = post_whatsapp(user_many, "la valoración")
+    assert "he cancelado tu cita" in cancelled.text.lower()
+    assert STORE.appointments[first["id"]]["status"] == "confirmed"
+    assert STORE.appointments[second["id"]]["status"] == "cancelled"
+
+    user_fail = "+34600000058"
+    reset_state(user_fail)
+    appointment = create_future_appointment(user_fail, "valoracion inicial", dt.datetime(2026, 5, 7, 10, 0))
+    post_whatsapp(user_fail, "cancelar cita")
+    from app.services import booking_service
+
+    previous_delete = booking_service.calendar_service.delete_event
+    booking_service.calendar_service.delete_event = lambda *_args, **_kwargs: False
+    try:
+        failed = post_whatsapp(user_fail, "sí")
+    finally:
+        booking_service.calendar_service.delete_event = previous_delete
+
+    assert "tu cita sigue igual" in failed.text.lower()
+    assert STORE.appointments[appointment["id"]]["status"] == "confirmed"

@@ -254,30 +254,52 @@ async def confirm_slot(
 
 
 async def reschedule_appointment(appointment_id: str, *, new_start_at: dt.datetime, new_end_at: dt.datetime) -> BookingResult:
-    appointment = supabase_repo.STORE.appointments.get(appointment_id)
+    appointment = await supabase_repo.get_appointment(appointment_id)
     if not appointment:
         return BookingResult(False, reason="not_found")
     calendar_event_id = appointment.get("calendar_event_id")
-    if calendar_event_id:
-        calendar_service.update_event(calendar_event_id, start_at=new_start_at, end_at=new_end_at)
+    if not calendar_event_id:
+        return BookingResult(False, reason="missing_calendar_event")
+    try:
+        updated_event = calendar_service.update_event(calendar_event_id, start_at=new_start_at, end_at=new_end_at)
+    except Exception as exc:
+        logger.warning("calendar_update_failed appointment_id=%s calendar_event_id=%s error=%r", appointment_id, calendar_event_id, exc)
+        return BookingResult(False, reason="calendar_update_failed")
+    if not updated_event:
+        return BookingResult(False, reason="calendar_update_failed")
     updated = await supabase_repo.update_appointment(
         appointment_id,
         start_at=new_start_at.isoformat(),
         end_at=new_end_at.isoformat(),
-        status="rescheduled",
+        status=appointment.get("status") or "confirmed",
     )
     return BookingResult(True, appointment=updated)
 
 
 async def cancel_appointment(appointment_id: str) -> BookingResult:
-    appointment = supabase_repo.STORE.appointments.get(appointment_id)
+    appointment = await supabase_repo.get_appointment(appointment_id)
     if not appointment:
         return BookingResult(False, reason="not_found")
     calendar_event_id = appointment.get("calendar_event_id")
-    if calendar_event_id:
-        calendar_service.delete_event(calendar_event_id)
+    if not calendar_event_id:
+        return BookingResult(False, reason="missing_calendar_event")
+    try:
+        deleted_event = calendar_service.delete_event(calendar_event_id)
+    except Exception as exc:
+        logger.warning("calendar_delete_failed appointment_id=%s calendar_event_id=%s error=%r", appointment_id, calendar_event_id, exc)
+        return BookingResult(False, reason="calendar_delete_failed")
+    if not deleted_event:
+        return BookingResult(False, reason="calendar_delete_failed")
     updated = await supabase_repo.cancel_appointment(appointment_id)
     return BookingResult(True, appointment=updated)
+
+
+async def list_future_appointments(*, patient_key: str) -> List[Dict[str, Any]]:
+    appointments = await supabase_repo.list_future_appointments_for_patient(
+        clinic_id=settings.DEMO_CLINIC_ID,
+        patient_key=patient_key,
+    )
+    return [appointment for appointment in appointments if appointment.get("calendar_event_id")]
 
 
 def get_appointment_status(appointment_id: str) -> Optional[Dict[str, Any]]:

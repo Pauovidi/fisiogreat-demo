@@ -11,9 +11,11 @@ from ..config.settings import settings
 from ..services.booking_service import (
     cancel_appointment,
     confirm_slot,
+    list_future_appointments,
     parse_slot_label,
     propose_slots as booking_propose_slots,
     reschedule_appointment,
+    service_duration_minutes,
 )
 from ..services.pelu_nlu import analyze_message
 from ..utils.date_parser import parse_spanish_day, parse_time_pref
@@ -24,6 +26,10 @@ from ..utils.booking_requirements import clean_consultation_reason, is_physiothe
 from ..utils.logger import logger
 from ..utils.mini_context import CTX
 from ..utils.patient_name import first_name, parse_patient_name
+from ..utils.appointment_options import (
+    format_appointment_option_whatsapp,
+    pick_appointment_option,
+)
 from ..utils.slot_picker import pick_slot
 from ..utils.whatsapp_copy import WA_COPY as copy
 
@@ -178,7 +184,6 @@ PENDING_FLOW_STAGES = {
     "awaiting_patient_name",
     "awaiting_date",
     "offering_slots",
-    "awaiting_reschedule_date",
 }
 
 
@@ -300,6 +305,128 @@ def _recent_booking_reply(key: str, *, farewell: bool = False) -> str:
     if slot:
         return copy.farewell_after_booking(slot, patient_name) if farewell else copy.thanks_after_booking(slot, patient_name)
     return copy.farewell_generic() if farewell else copy.thanks_generic()
+
+
+def _is_yes(body: str) -> bool:
+    normalized = normalize_text(body)
+    return normalized in {"si", "sí", "vale", "ok", "de acuerdo", "confirmo", "correcto", "adelante"}
+
+
+def _is_no(body: str) -> bool:
+    normalized = normalize_text(body)
+    return normalized in {"no", "mejor no", "cancelar", "dejalo", "déjalo"}
+
+
+async def _start_appointment_action(key: str, *, action: str) -> str:
+    appointments = await list_future_appointments(patient_key=key)
+    CTX.clear_flow(key)
+    if not appointments:
+        if action == "cancel":
+            return "No encuentro citas futuras a tu nombre."
+        return "No encuentro citas futuras a tu nombre. Si quieres, puedo ayudarte a pedir una nueva cita."
+
+    CTX.set_pending_appointments(key, action=action, appointments=appointments)
+    if len(appointments) == 1:
+        appointment = appointments[0]
+        CTX.set_selected_appointment(key, appointment)
+        if action == "cancel":
+            CTX.set_stage(key, "awaiting_cancel_confirmation")
+            return f"He encontrado tu cita de {format_appointment_option_whatsapp(appointment).lower()}. ¿Quieres cancelarla?"
+        CTX.set_stage(key, "awaiting_reschedule_confirmation")
+        return f"He encontrado tu cita de {format_appointment_option_whatsapp(appointment).lower()}. ¿Quieres cambiar esa cita?"
+
+    CTX.set_stage(key, "awaiting_cancel_selection" if action == "cancel" else "awaiting_reschedule_selection")
+    lines = ["He encontrado estas citas futuras a tu nombre:"]
+    for index, appointment in enumerate(appointments, start=1):
+        lines.append(format_appointment_option_whatsapp(appointment, index))
+    question = "¿Cuál quieres cancelar?" if action == "cancel" else "¿Cuál quieres cambiar? Dime el número."
+    lines.append("")
+    lines.append(question)
+    return "\n".join(lines)
+
+
+def _pending_appointments(key: str, *, action: str) -> List[dict]:
+    ctx = CTX.get(key) or {}
+    field = "pending_cancel_appointments" if action == "cancel" else "pending_reschedule_appointments"
+    return list(ctx.get(field) or [])
+
+
+def _selected_appointment(key: str, *, action: str) -> Optional[dict]:
+    ctx = CTX.get(key) or {}
+    selected_id = ctx.get("selected_appointment_id")
+    for appointment in _pending_appointments(key, action=action):
+        if appointment.get("id") == selected_id:
+            return appointment
+    if selected_id:
+        return supabase_repo.STORE.appointments.get(selected_id)
+    return None
+
+
+async def _cancel_selected_appointment(key: str, appointment: dict) -> str:
+    result = await cancel_appointment(appointment.get("id"))
+    if not result.ok:
+        CTX.clear_flow(key)
+        return "No he podido cancelar la cita ahora mismo. Tu cita sigue igual."
+    patient_name = (appointment.get("metadata") or {}).get("patient_name")
+    service = (appointment.get("service_type") or "cita").lower()
+    when = format_appointment_option_whatsapp(appointment).split(" - ", 1)[-1]
+    CTX.clear_flow(key)
+    first = first_name(patient_name)
+    prefix = f"De acuerdo, {first}. " if first else "De acuerdo. "
+    return f"{prefix}He cancelado tu cita de {service} del {when}."
+
+
+def _ask_new_day_for_selected(key: str, appointment: dict) -> str:
+    CTX.set_selected_appointment(key, appointment)
+    CTX.set_service(key, appointment.get("service_type"))
+    CTX.set_stage(key, "awaiting_reschedule_date")
+    return "Perfecto. ¿Qué nuevo día te viene bien?"
+
+
+async def _offer_reschedule_slots(key: str, body: str) -> str:
+    parsed_date = parse_spanish_day(body)
+    if not parsed_date:
+        return "Dime el nuevo día, por ejemplo mañana o jueves."
+    time_pref = parse_time_pref(body)
+    appointment = _selected_appointment(key, action="reschedule")
+    if not appointment:
+        CTX.clear_flow(key)
+        return "No he podido identificar la cita que quieres cambiar. Empezamos de nuevo si te parece."
+    service = appointment.get("service_type") or "sesion de fisioterapia"
+    CTX.set_date(key, parsed_date)
+    CTX.set_time_pref(key, time_pref)
+    CTX.set_service(key, service)
+    CTX.set_slots(key, _build_slot_labels(service, parsed_date, time_pref))
+    CTX.set_stage(key, "offering_reschedule_slots")
+    return copy.propose_slots(CTX.next_slots(key, WA_PAGE_SIZE))
+
+
+async def _confirm_reschedule_slot(key: str, body: str) -> str:
+    current = _current_slots(key)
+    selected = pick_slot(body, current)
+    if not selected:
+        return copy.propose_slots(current)
+    appointment = _selected_appointment(key, action="reschedule")
+    selected_dt = parse_slot_label(selected)
+    if not appointment or not selected_dt:
+        CTX.clear_flow(key)
+        return "No he podido leer bien ese hueco. Empezamos de nuevo si te parece."
+    service = appointment.get("service_type") or "sesion de fisioterapia"
+    result = await reschedule_appointment(
+        appointment.get("id"),
+        new_start_at=selected_dt,
+        new_end_at=selected_dt + dt.timedelta(minutes=service_duration_minutes(service)),
+    )
+    if not result.ok:
+        CTX.clear_flow(key)
+        return "No he podido cambiar la cita ahora mismo. Tu cita original sigue igual."
+    updated = result.appointment or appointment
+    patient_name = (updated.get("metadata") or {}).get("patient_name")
+    first = first_name(patient_name)
+    prefix = f"Perfecto, {first}. " if first else "Perfecto. "
+    CTX.clear_flow(key)
+    CTX.set_last_confirmed_slot(key, selected, service=service, patient_name=patient_name)
+    return f"{prefix}He cambiado tu cita de {service} al {selected}."
 
 
 @router.post("/whatsapp")
@@ -501,34 +628,42 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
             if route_peek["type"] not in {"faq", "out_of_scope", "cancel", "reschedule", "greeting", "booking"}:
                 return _twiml(copy.propose_slots(current))
 
-        elif current_stage == "awaiting_cancel_date":
-            appointment_id = _latest_appointment_id(wa_from)
-            CTX.clear_flow(wa_from)
-            if appointment_id:
-                appointment = supabase_repo.STORE.appointments.get(appointment_id) or {}
-                patient_name = (appointment.get("metadata") or {}).get("patient_name")
-                await cancel_appointment(appointment_id)
-                first = first_name(patient_name)
-                prefix = f"Listo, {first}, " if first else "Listo, "
-                return _twiml(f"{prefix}he dejado la cita cancelada.")
-            return _twiml("No encuentro una cita activa para cancelar desde este chat. Te paso con el equipo.")
+        elif current_stage == "awaiting_cancel_confirmation":
+            appointment = _selected_appointment(wa_from, action="cancel")
+            if _is_yes(body) and appointment:
+                return _twiml(await _cancel_selected_appointment(wa_from, appointment))
+            if _is_no(body):
+                CTX.clear_flow(wa_from)
+                return _twiml("De acuerdo, no cancelo nada. ¿En qué puedo ayudarte?")
+            return _twiml("Dime si quieres cancelar esa cita, por favor.")
+
+        elif current_stage == "awaiting_cancel_selection":
+            selected_appointment = pick_appointment_option(body, _pending_appointments(wa_from, action="cancel"))
+            if not selected_appointment:
+                return _twiml("No he identificado cuál quieres cancelar. Dime el número de la cita.")
+            CTX.set_selected_appointment(wa_from, selected_appointment)
+            return _twiml(await _cancel_selected_appointment(wa_from, selected_appointment))
+
+        elif current_stage == "awaiting_reschedule_confirmation":
+            appointment = _selected_appointment(wa_from, action="reschedule")
+            if _is_yes(body) and appointment:
+                return _twiml(_ask_new_day_for_selected(wa_from, appointment))
+            if _is_no(body):
+                CTX.clear_flow(wa_from)
+                return _twiml("De acuerdo, no cambio nada. ¿En qué puedo ayudarte?")
+            return _twiml("Dime si quieres cambiar esa cita, por favor.")
+
+        elif current_stage == "awaiting_reschedule_selection":
+            selected_appointment = pick_appointment_option(body, _pending_appointments(wa_from, action="reschedule"))
+            if not selected_appointment:
+                return _twiml("No he identificado cuál quieres cambiar. Dime el número de la cita.")
+            return _twiml(_ask_new_day_for_selected(wa_from, selected_appointment))
 
         elif current_stage == "awaiting_reschedule_date":
-            parsed_date = parse_spanish_day(body)
-            appointment_id = _latest_appointment_id(wa_from)
-            if parsed_date and appointment_id:
-                new_start = dt.datetime.combine(parsed_date, dt.time(10, 0))
-                await reschedule_appointment(
-                    appointment_id,
-                    new_start_at=new_start,
-                    new_end_at=new_start + dt.timedelta(minutes=45),
-                )
-                CTX.clear_flow(wa_from)
-                appointment = supabase_repo.STORE.appointments.get(appointment_id) or {}
-                first = first_name((appointment.get("metadata") or {}).get("patient_name"))
-                prefix = f"Listo, {first}, " if first else "Listo, "
-                return _twiml(f"{prefix}he cambiado la cita. Te queda confirmada para el nuevo día a las 10:00.")
-            return _twiml("Dime el nuevo día, por ejemplo mañana o jueves.")
+            return _twiml(await _offer_reschedule_slots(wa_from, body))
+
+        elif current_stage == "offering_reschedule_slots":
+            return _twiml(await _confirm_reschedule_slot(wa_from, body))
 
         route = route_message(body)
         route_type = route["type"]
@@ -571,21 +706,19 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
             return _twiml(copy.main_menu_soft())
 
         if route_type == "cancel":
-            CTX.set_stage(wa_from, "awaiting_cancel_date")
-            return _twiml("Para cancelar una cita, dime la fecha y la hora aproximada y te ayudo.")
+            return _twiml(await _start_appointment_action(wa_from, action="cancel"))
 
         if route_type == "reschedule":
-            CTX.set_stage(wa_from, "awaiting_reschedule_date")
-            return _twiml("Para cambiar la cita, dime el nuevo día que te vendría mejor.")
+            return _twiml(await _start_appointment_action(wa_from, action="reschedule"))
 
         if route_type == "out_of_scope":
             return _twiml(copy.out_of_scope())
 
         nlu = await analyze_message(body)
         if nlu.get("intent") == "cancel":
-            return _twiml("Para cancelar una cita, dime la fecha y la hora aproximada y te ayudo.")
+            return _twiml(await _start_appointment_action(wa_from, action="cancel"))
         if nlu.get("intent") == "change":
-            return _twiml("Para cambiar la cita, dime la cita actual y el nuevo día que te vendría mejor.")
+            return _twiml(await _start_appointment_action(wa_from, action="reschedule"))
 
         if CTX.get_stage(wa_from) == "awaiting_service":
             return _twiml(copy.ask_service_retry())
