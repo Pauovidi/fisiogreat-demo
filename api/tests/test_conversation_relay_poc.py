@@ -42,6 +42,27 @@ def create_voice_appointment(call_sid: str, service: str, start: dt.datetime):
     return result.appointment
 
 
+def drive_conversationrelay_to_contact(websocket, call_sid: str, *, setup_payload=None):
+    setup = {"type": "setup", "sessionId": f"VX-{call_sid}", "callSid": call_sid}
+    if setup_payload:
+        setup.update(setup_payload)
+    websocket.send_json(setup)
+    websocket.receive_json()
+    websocket.send_json({"type": "prompt", "voicePrompt": "quiero sesion de fisioterapia", "last": True})
+    websocket.receive_json()
+    websocket.send_json({"type": "prompt", "voicePrompt": "me duele la rodilla", "last": True})
+    websocket.receive_json()
+    websocket.send_json({"type": "prompt", "voicePrompt": "Pau Marco", "last": True})
+    websocket.receive_json()
+    websocket.send_json({"type": "prompt", "voicePrompt": "jueves", "last": True})
+    websocket.receive_json()
+    websocket.send_json({"type": "prompt", "voicePrompt": "la segunda", "last": True})
+    ask_contact = websocket.receive_json()
+    assert "telefono" in ask_contact["token"].lower() or "email" in ask_contact["token"].lower()
+    assert CTX.get_stage(call_sid) == "awaiting_contact"
+    return ask_contact
+
+
 def test_conversationrelay_twiml_exposes_websocket_without_cloud_run_coupling():
     response = client.post("/webhook/voice/conversationrelay")
     assert response.status_code == 200
@@ -123,6 +144,7 @@ def test_conversationrelay_booking_keeps_whatsapp_stage_order_and_masks_contact_
     logs = "\n".join(record.getMessage() for record in caplog.records)
     assert "conversationrelay_turn" in logs
     assert "pau@example.com" not in logs
+    assert "pau example com" not in logs
     assert "p***@example.com" in logs
 
 
@@ -189,6 +211,93 @@ def test_conversationrelay_accepts_normal_patient_names_and_continues_to_date(sp
         assert slots["last"] is True
         assert "tengo" in slots["token"].lower()
         assert CTX.get_stage(call_sid) == "offering_slots"
+
+
+def test_conversationrelay_accepts_spoken_email_contact_and_confirms():
+    call_sid = "CA-conversationrelay-spoken-email-contact"
+    reset_state(call_sid)
+
+    with client.websocket_connect("/webhook/voice/conversationrelay/ws") as websocket:
+        drive_conversationrelay_to_contact(websocket, call_sid)
+        websocket.send_json({
+            "type": "prompt",
+            "voicePrompt": "mi email es marcos arroba ejemplo punto com",
+            "last": True,
+        })
+        confirm = websocket.receive_json()
+
+    assert confirm["type"] == "text"
+    assert "gracias" in confirm["token"].lower()
+    assert "no he entendido" not in confirm["token"].lower()
+    appointment = next(iter(STORE.appointments.values()))
+    assert appointment["metadata"]["contact_email"] == "marcos@ejemplo.com"
+    assert appointment["metadata"]["contact_channel_preference"] == "email"
+    assert CTX.get_stage(call_sid) == "completed"
+
+
+def test_conversationrelay_contact_retry_copy_is_helpful_and_not_duplicated():
+    call_sid = "CA-conversationrelay-contact-retry-copy"
+    reset_state(call_sid)
+
+    with client.websocket_connect("/webhook/voice/conversationrelay/ws") as websocket:
+        drive_conversationrelay_to_contact(websocket, call_sid)
+        websocket.send_json({"type": "prompt", "voicePrompt": "Marcos Castellano", "last": True})
+        first_retry = websocket.receive_json()
+        websocket.send_json({"type": "prompt", "voicePrompt": "marcos arroba ejemplo", "last": True})
+        second_retry = websocket.receive_json()
+        websocket.send_json({"type": "prompt", "voicePrompt": "gracias", "last": True})
+        pending_contact = websocket.receive_json()
+
+    assert "marcos arroba ejemplo punto com" in first_retry["token"].lower()
+    assert "sigo sin entenderlo" in second_retry["token"].lower()
+    assert "no lo he no lo he" not in second_retry["token"].lower()
+    assert "necesito un telefono o email" in pending_contact["token"].lower()
+    assert CTX.get_stage(call_sid) == "awaiting_contact"
+    assert not STORE.appointments
+
+
+def test_conversationrelay_accepts_phone_contact_and_suggested_from_number():
+    call_sid = "CA-conversationrelay-phone-contact"
+    reset_state(call_sid)
+
+    with client.websocket_connect("/webhook/voice/conversationrelay/ws") as websocket:
+        drive_conversationrelay_to_contact(websocket, call_sid)
+        websocket.send_json({"type": "prompt", "voicePrompt": "640 50 50 50", "last": True})
+        confirm = websocket.receive_json()
+
+    assert "gracias" in confirm["token"].lower()
+    appointment = next(iter(STORE.appointments.values()))
+    assert appointment["metadata"]["contact_phone"] == "640505050"
+
+    from_sid = "CA-conversationrelay-from-number"
+    reset_state(from_sid)
+    with client.websocket_connect("/webhook/voice/conversationrelay/ws") as websocket:
+        ask_contact = drive_conversationrelay_to_contact(
+            websocket,
+            from_sid,
+            setup_payload={"from": "+34640505050"},
+        )
+        assert "este numero" in ask_contact["token"].lower()
+        websocket.send_json({"type": "prompt", "voicePrompt": "si a este numero", "last": True})
+        confirm_from = websocket.receive_json()
+
+    assert "gracias" in confirm_from["token"].lower()
+    appointment = next(iter(STORE.appointments.values()))
+    assert appointment["metadata"]["contact_phone"] == "34640505050"
+
+
+def test_conversationrelay_emergency_in_contact_does_not_confirm():
+    call_sid = "CA-conversationrelay-contact-emergency"
+    reset_state(call_sid)
+
+    with client.websocket_connect("/webhook/voice/conversationrelay/ws") as websocket:
+        drive_conversationrelay_to_contact(websocket, call_sid)
+        websocket.send_json({"type": "prompt", "voicePrompt": "me duele el pecho y me cuesta respirar", "last": True})
+        emergency = websocket.receive_json()
+
+    assert "112" in emergency["token"]
+    assert CTX.get_stage(call_sid) == "emergency_detected"
+    assert not STORE.appointments
 
 
 def test_conversationrelay_calendar_failure_does_not_confirm(monkeypatch):

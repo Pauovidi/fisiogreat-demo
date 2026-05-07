@@ -208,6 +208,25 @@ def test_voice_confirms_with_valid_email_and_stores_contact():
     assert appointment["metadata"]["consultation_reason"] == "me duele la rodilla"
 
 
+def test_voice_confirms_with_spoken_email_and_stores_normalized_contact():
+    call_sid = "CA-voice-spoken-email-1"
+    reset_state(call_sid)
+
+    post_voice(call_sid)
+    post_voice(call_sid, SpeechResult="sesion de fisioterapia")
+    post_voice(call_sid, SpeechResult="me duele la rodilla")
+    post_voice(call_sid, SpeechResult="Pau Marco")
+    post_voice(call_sid, SpeechResult="jueves")
+    post_voice(call_sid, SpeechResult="primera")
+    response = post_voice(call_sid, SpeechResult="mi email es marcos arroba ejemplo punto com")
+
+    assert "gracias" in response.text.lower()
+    assert "no he entendido" not in response.text.lower()
+    appointment = next(iter(STORE.appointments.values()))
+    assert appointment["metadata"]["contact_email"] == "marcos@ejemplo.com"
+    assert appointment["metadata"]["contact_channel_preference"] == "email"
+
+
 def test_voice_reprompts_invalid_contact_without_booking():
     call_sid = "CA-voice-invalid-contact-1"
     reset_state(call_sid)
@@ -219,7 +238,28 @@ def test_voice_reprompts_invalid_contact_without_booking():
     post_voice(call_sid, SpeechResult="primera")
     response = post_voice(call_sid, SpeechResult="no lo se")
 
-    assert "repetir" in response.text.lower()
+    assert "marcos arroba ejemplo punto com" in response.text.lower()
+    assert CTX.get_stage(call_sid) == "awaiting_contact"
+    assert not STORE.appointments
+
+
+def test_voice_contact_retry_copy_changes_and_requires_contact_before_thanks():
+    call_sid = "CA-voice-contact-retry-copy"
+    reset_state(call_sid)
+
+    post_voice(call_sid)
+    post_voice(call_sid, SpeechResult="valoracion inicial")
+    post_voice(call_sid, SpeechResult="Pau Marco")
+    post_voice(call_sid, SpeechResult="jueves")
+    post_voice(call_sid, SpeechResult="primera")
+
+    first_retry = post_voice(call_sid, SpeechResult="Marcos Castellano")
+    assert "marcos arroba ejemplo punto com" in first_retry.text.lower()
+    second_retry = post_voice(call_sid, SpeechResult="marcos arroba ejemplo")
+    assert "sigo sin entenderlo" in second_retry.text.lower()
+    assert "no lo he no lo he" not in second_retry.text.lower()
+    thanks = post_voice(call_sid, SpeechResult="gracias")
+    assert "necesito un telefono o email" in thanks.text.lower()
     assert CTX.get_stage(call_sid) == "awaiting_contact"
     assert not STORE.appointments
 
@@ -252,6 +292,38 @@ def test_voice_confirms_with_valid_phone_and_can_confirm_from_number():
     assert "gracias" in response.text.lower()
     appointment = next(iter(STORE.appointments.values()))
     assert appointment["metadata"]["contact_phone"] == "34640786765"
+
+
+def test_voice_confirms_with_spoken_phone_words():
+    call_sid = "CA-voice-spoken-phone"
+    reset_state(call_sid)
+
+    post_voice(call_sid)
+    post_voice(call_sid, SpeechResult="valoracion inicial")
+    post_voice(call_sid, SpeechResult="Pau Marco")
+    post_voice(call_sid, SpeechResult="jueves")
+    post_voice(call_sid, SpeechResult="primera")
+    response = post_voice(call_sid, SpeechResult="seis cuarenta cincuenta cincuenta cincuenta")
+
+    assert "gracias" in response.text.lower()
+    appointment = next(iter(STORE.appointments.values()))
+    assert appointment["metadata"]["contact_phone"] == "640505050"
+
+
+def test_voice_emergency_in_contact_does_not_confirm():
+    call_sid = "CA-voice-contact-emergency"
+    reset_state(call_sid)
+
+    post_voice(call_sid)
+    post_voice(call_sid, SpeechResult="valoracion inicial")
+    post_voice(call_sid, SpeechResult="Pau Marco")
+    post_voice(call_sid, SpeechResult="jueves")
+    post_voice(call_sid, SpeechResult="primera")
+    response = post_voice(call_sid, SpeechResult="me duele el pecho y me cuesta respirar")
+
+    assert "112" in response.text
+    assert CTX.get_stage(call_sid) == "emergency_detected"
+    assert not STORE.appointments
 
 
 def test_voice_reschedule_and_faq_prompts():

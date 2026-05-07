@@ -105,8 +105,17 @@ class VoiceCopy:
         )
 
     @staticmethod
-    def ask_contact_retry() -> str:
-        return "No lo he entendido bien. Puedes repetir el telefono o el email?"
+    def ask_contact_retry(attempt: int = 1) -> str:
+        if attempt <= 1:
+            return (
+                "Perdona, no lo he entendido bien. Puedes decir un email como "
+                "marcos arroba ejemplo punto com, o un telefono movil."
+            )
+        return "Sigo sin entenderlo. Si quieres, dime solo un telefono movil, por ejemplo 640 50 50 50."
+
+    @staticmethod
+    def contact_required_before_closing() -> str:
+        return "Antes de cerrar la cita necesito un telefono o email para enviarte la confirmacion."
 
     @staticmethod
     def thanks_name_then_date(first_name: str) -> str:

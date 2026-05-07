@@ -52,6 +52,12 @@ WEEKDAY_LABELS = [
 
 def mask_sensitive_text(value: Any) -> str:
     text = "" if value is None else str(value)
+    contact_phone, contact_email = extract_contact(text)
+    normalized_for_mask = normalize_text(text)
+    if (contact_email and "@" not in text) or ("arroba" in normalized_for_mask and "punto" in normalized_for_mask):
+        return "[email dictado]"
+    if contact_phone and not re.search(r"(?<!\w)\+?(?:\d[\s().-]?){9,15}(?!\w)", text):
+        return "[telefono dictado]"
     text = re.sub(
         r"\b([A-Za-z0-9._%+-])[A-Za-z0-9._%+-]*@([A-Za-z0-9.-]+\.[A-Za-z]{2,})\b",
         r"\1***@\2",
@@ -88,10 +94,12 @@ def _log_conversationrelay_turn(
     ctx_before = ctx_before or {}
     ctx = CTX.get(key) or {}
     contact_phone, contact_email = extract_contact(user_text)
+    masked_user_text = mask_sensitive_text(user_text)
+    masked_normalized_text = masked_user_text if (contact_phone or contact_email) else mask_sensitive_text(normalized_text)
     payload = {
         "call_sid": key,
-        "user_text": mask_sensitive_text(user_text),
-        "normalized_text": mask_sensitive_text(normalized_text),
+        "user_text": masked_user_text,
+        "normalized_text": masked_normalized_text,
         "stage_before": stage_before,
         "stage_after": stage_after,
         "intent_detected": intent_detected,
@@ -347,6 +355,13 @@ def _patient_name_retry_prompt(key: str) -> str:
     return copy.ask_patient_name_retry(attempts)
 
 
+def _contact_retry_prompt(key: str) -> str:
+    ctx = CTX.get(key) or {}
+    attempts = int(ctx.get("contact_parse_failures") or 0) + 1
+    ctx["contact_parse_failures"] = attempts
+    return copy.ask_contact_retry(attempts)
+
+
 async def _handle_user_input(key: str, user_text: str) -> str:
     stage_before = CTX.get_stage(key)
     ctx_before = dict(CTX.get(key) or {})
@@ -394,6 +409,9 @@ async def _handle_user_input_core(key: str, user_text: str) -> str:
         return emergency_reply("voice")
 
     route_peek = route_message(user_text)
+
+    if current_stage == "awaiting_contact" and route_peek["type"] in {"thanks", "farewell"}:
+        return copy.contact_required_before_closing()
 
     if route_peek["type"] == "thanks":
         return _recent_booking_reply(key)
@@ -656,7 +674,8 @@ async def _handle_user_input_core(key: str, user_text: str) -> str:
         if not phone and not email and confirms_current_phone(user_text) and ctx.get("suggested_contact_phone"):
             phone = ctx.get("suggested_contact_phone")
         if not phone and not email:
-            return copy.ask_contact_retry()
+            return _contact_retry_prompt(key)
+        ctx["contact_parse_failures"] = 0
         CTX.set_contact(
             key,
             contact_phone=phone,
@@ -683,7 +702,7 @@ async def _handle_user_input_core(key: str, user_text: str) -> str:
         )
         if not booking_result.ok:
             if booking_result.reason == "missing_contact":
-                return copy.ask_contact_retry()
+                return _contact_retry_prompt(key)
             return "Ese hueco acaba de ocuparse. Te digo otras opciones."
         appointment = booking_result.appointment
         patient_name = (appointment or {}).get("metadata", {}).get("patient_name") or ctx.get("patient_name")
@@ -766,7 +785,7 @@ def _reprompt_for_stage(key: str) -> str:
     if stage == "awaiting_consultation_reason":
         return copy.ask_consultation_reason_retry()
     if stage == "awaiting_contact":
-        return copy.ask_contact_retry()
+        return _contact_retry_prompt(key)
     if stage == "awaiting_date":
         return copy.ask_date(ctx.get("service"))
     if stage == "offering_slots":

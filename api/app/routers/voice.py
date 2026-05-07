@@ -291,10 +291,17 @@ def _since_last_prompt_ms(call_sid: str) -> Optional[float]:
 def _log_turn(call_sid: str, stats: Dict[str, Any]):
     ctx_before = stats.get("ctx_before") or {}
     ctx = CTX.get(call_sid) or {}
+    contact_phone, contact_email = extract_contact(stats.get("raw", ""))
+    masked_user_text = mask_sensitive_text(stats.get("raw", ""))
+    masked_normalized_text = (
+        masked_user_text
+        if (contact_phone or contact_email)
+        else mask_sensitive_text(stats.get("normalized", ""))
+    )
     payload = {
         "call_sid": call_sid,
-        "user_text": mask_sensitive_text(stats.get("raw", "")),
-        "normalized_text": mask_sensitive_text(stats.get("normalized", "")),
+        "user_text": masked_user_text,
+        "normalized_text": masked_normalized_text,
         "stage_before": stats.get("stage_before"),
         "stage_after": stats.get("stage_after"),
         "intent_detected": stats.get("intent_detected"),
@@ -421,7 +428,7 @@ def _reprompt_for_stage(call_sid: str) -> str:
     if stage == "awaiting_consultation_reason":
         return copy.ask_consultation_reason_retry()
     if stage == "awaiting_contact":
-        return copy.ask_contact_retry()
+        return _contact_retry_prompt(call_sid)
     if stage == "awaiting_date":
         return copy.ask_date(ctx.get("service"))
     if stage == "offering_slots":
@@ -476,6 +483,13 @@ def _patient_name_retry_prompt(key: str) -> str:
     attempts = int(ctx.get("patient_name_parse_failures") or 0) + 1
     ctx["patient_name_parse_failures"] = attempts
     return copy.ask_patient_name_retry(attempts)
+
+
+def _contact_retry_prompt(key: str) -> str:
+    ctx = CTX.get(key) or {}
+    attempts = int(ctx.get("contact_parse_failures") or 0) + 1
+    ctx["contact_parse_failures"] = attempts
+    return copy.ask_contact_retry(attempts)
 
 
 def _absolute_url(path: str) -> str:
@@ -666,6 +680,11 @@ async def agent_entry(
 
         route = route_message(user_text)
         stats["intent_detected"] = route["type"]
+
+        if current_stage == "awaiting_contact" and route["type"] in {"thanks", "farewell"}:
+            stats["branch"] = "contact_required_before_close"
+            stats["stage_after"] = "awaiting_contact"
+            return _respond_gather(CallSid, copy.contact_required_before_closing(), stats)
 
         if route["type"] == "thanks":
             stats["branch"] = "thanks"
@@ -1051,8 +1070,9 @@ async def agent_entry(
             if not phone and not email:
                 stats["branch"] = "contact_retry"
                 stats["stage_after"] = "awaiting_contact"
-                return _respond_gather(CallSid, copy.ask_contact_retry(), stats)
+                return _respond_gather(CallSid, _contact_retry_prompt(CallSid), stats)
             stats["contact_present"] = True
+            ctx["contact_parse_failures"] = 0
             CTX.set_contact(
                 CallSid,
                 contact_phone=phone,
@@ -1079,7 +1099,7 @@ async def agent_entry(
                     stats["branch"] = f"slot_confirm_failed_{booking_result.reason}"
                     if booking_result.reason == "missing_contact":
                         stats["stage_after"] = "awaiting_contact"
-                        return _respond_gather(CallSid, copy.ask_contact_retry(), stats)
+                        return _respond_gather(CallSid, _contact_retry_prompt(CallSid), stats)
                     return _respond_gather(
                         CallSid,
                         "Ese hueco acaba de ocuparse. Te digo otras opciones.",
