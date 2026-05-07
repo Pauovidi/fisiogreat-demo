@@ -261,8 +261,9 @@ def test_voice_can_cancel_and_reschedule_existing_booking():
 def test_voice_lists_multiple_future_appointments_and_uses_selection_not_last_slot():
     call_sid = "CA-voice-multiple-appointments"
     reset_state(call_sid)
-    first = create_voice_appointment(call_sid, "sesion de fisioterapia", dt.datetime(2026, 5, 7, 10, 0))
-    second = create_voice_appointment(call_sid, "valoracion inicial", dt.datetime(2026, 5, 8, 10, 0))
+    first = create_voice_appointment(call_sid, "sesion de fisioterapia", dt.datetime(2026, 5, 8, 10, 0))
+    second = create_voice_appointment(call_sid, "valoracion inicial", dt.datetime(2026, 5, 9, 10, 0))
+    original_second_start = second["start_at"]
 
     listed = post_voice(call_sid, SpeechResult="quiero cambiar mi cita")
     assert "varias citas futuras" in listed.text.lower()
@@ -277,15 +278,15 @@ def test_voice_lists_multiple_future_appointments_and_uses_selection_not_last_sl
     post_voice(call_sid, SpeechResult="viernes")
     changed = post_voice(call_sid, SpeechResult="primera")
     assert "he cambiado tu cita" in changed.text.lower()
-    assert STORE.appointments[first["id"]]["start_at"].startswith("2026-05-07")
-    assert STORE.appointments[second["id"]]["start_at"].startswith("2026-05-08")
+    assert STORE.appointments[first["id"]]["start_at"].startswith("2026-05-08")
+    assert STORE.appointments[second["id"]]["start_at"] != original_second_start
 
 
 def test_voice_lists_multiple_future_appointments_for_cancel_and_understands_first():
     call_sid = "CA-voice-cancel-multiple"
     reset_state(call_sid)
-    first = create_voice_appointment(call_sid, "sesion de fisioterapia", dt.datetime(2026, 5, 7, 10, 0))
-    second = create_voice_appointment(call_sid, "valoracion inicial", dt.datetime(2026, 5, 8, 10, 0))
+    first = create_voice_appointment(call_sid, "sesion de fisioterapia", dt.datetime(2026, 5, 8, 10, 0))
+    second = create_voice_appointment(call_sid, "valoracion inicial", dt.datetime(2026, 5, 9, 10, 0))
 
     listed = post_voice(call_sid, SpeechResult="quiero cancelar mi cita")
     assert "varias citas futuras" in listed.text.lower()

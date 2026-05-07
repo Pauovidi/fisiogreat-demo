@@ -323,7 +323,7 @@ def test_list_future_appointments_filters_patient_status_past_and_calendar_event
     CALENDAR_STORE.reset()
     user = "+34600001000"
     patient = asyncio.run(supabase_repo.create_patient(clinic_id=settings.DEMO_CLINIC_ID, phone=user, name="Pau Marco"))
-    future = dt.datetime(2026, 5, 7, 10, 0)
+    future = dt.datetime(2026, 5, 8, 10, 0)
     past = dt.datetime(2026, 5, 5, 10, 0)
 
     asyncio.run(supabase_repo.create_appointment(

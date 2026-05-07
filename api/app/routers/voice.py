@@ -15,6 +15,7 @@ from ..services.conversation_relay import (
     handle_interrupt_message,
     handle_prompt_message,
     handle_setup_message,
+    mask_sensitive_text,
 )
 from ..services import supabase_repo
 from ..services.booking_service import (
@@ -288,13 +289,27 @@ def _since_last_prompt_ms(call_sid: str) -> Optional[float]:
 
 
 def _log_turn(call_sid: str, stats: Dict[str, Any]):
+    ctx_before = stats.get("ctx_before") or {}
+    ctx = CTX.get(call_sid) or {}
     payload = {
         "call_sid": call_sid,
+        "user_text": mask_sensitive_text(stats.get("raw", "")),
+        "normalized_text": mask_sensitive_text(stats.get("normalized", "")),
         "stage_before": stats.get("stage_before"),
         "stage_after": stats.get("stage_after"),
+        "intent_detected": stats.get("intent_detected"),
+        "selected_service": ctx.get("service") or ctx_before.get("service"),
+        "consultation_reason_present": bool(ctx.get("consultation_reason") or ctx_before.get("consultation_reason")),
+        "patient_name_present": bool(ctx.get("patient_name") or ctx_before.get("patient_name")),
+        "contact_present": bool(
+            stats.get("contact_present")
+            or ctx.get("contact_phone")
+            or ctx.get("contact_email")
+            or ctx_before.get("contact_phone")
+            or ctx_before.get("contact_email")
+        ),
         "branch": stats.get("branch"),
-        "raw": stats.get("raw", ""),
-        "normalized": stats.get("normalized", ""),
+        "bot_reply": mask_sensitive_text(stats.get("bot_reply", "")),
         "speech_present": stats.get("speech_present", False),
         "speech_available_ms": round(stats.get("speech_available_ms", 0.0), 1),
         "turn_gap_ms": stats.get("turn_gap_ms"),
@@ -318,6 +333,7 @@ def _respond_gather(call_sid: str, prompt: str, stats: Dict[str, Any]) -> Respon
         f"{_say(prompt)}</Gather>"
     )
     response = _twiml(body)
+    stats["bot_reply"] = prompt
     stats["tts_mode"] = "say"
     stats["twiml_ms"] = (time.perf_counter() - twiml_start) * 1000
     stats["total_ms"] = (time.perf_counter() - stats["start"]) * 1000
@@ -585,6 +601,7 @@ async def agent_entry(
         "branch": "unknown",
         "stage_before": CTX.get_stage(CallSid),
         "stage_after": CTX.get_stage(CallSid),
+        "ctx_before": dict(CTX.get(CallSid) or {}),
         "speech_present": bool(SpeechResult or Digits),
         "speech_available_ms": 0.0,
         "turn_gap_ms": _since_last_prompt_ms(CallSid),
@@ -616,7 +633,10 @@ async def agent_entry(
         normalized = _normalize_voice_text(user_text)
         stats["raw"] = user_text
         stats["normalized"] = normalized
-        logger.info(f"voice_input call_sid={CallSid!r} raw={user_text!r} normalized={normalized!r}")
+        logger.info(
+            f"voice_input call_sid={CallSid!r} raw={mask_sensitive_text(user_text)!r} "
+            f"normalized={mask_sensitive_text(normalized)!r}"
+        )
 
         current_stage = CTX.get_stage(CallSid)
         emergency = detect_emergency(user_text)
@@ -638,6 +658,7 @@ async def agent_entry(
             return _respond_gather(CallSid, emergency_reply("voice"), stats)
 
         route = route_message(user_text)
+        stats["intent_detected"] = route["type"]
 
         if route["type"] == "thanks":
             stats["branch"] = "thanks"
@@ -1022,6 +1043,7 @@ async def agent_entry(
                 stats["branch"] = "contact_retry"
                 stats["stage_after"] = "awaiting_contact"
                 return _respond_gather(CallSid, copy.ask_contact_retry(), stats)
+            stats["contact_present"] = True
             CTX.set_contact(
                 CallSid,
                 contact_phone=phone,
@@ -1169,7 +1191,7 @@ async def conversationrelay_ws(websocket: WebSocket):
         while True:
             raw_message = await websocket.receive_text()
             ws_received_at = time.perf_counter()
-            logger.info(f"conversationrelay_ws_recv raw={raw_message}")
+            logger.info(f"conversationrelay_ws_recv raw={mask_sensitive_text(raw_message)}")
 
             try:
                 payload = json.loads(raw_message)
@@ -1227,18 +1249,21 @@ async def conversationrelay_ws(websocket: WebSocket):
                 if message_type == "error":
                     logger.warning(
                         "conversationrelay_ws_error "
-                        f"call_sid={session.call_sid!r} session_id={session.session_id!r} payload={json.dumps(payload, ensure_ascii=False)}"
+                        f"call_sid={session.call_sid!r} session_id={session.session_id!r} "
+                        f"payload={mask_sensitive_text(json.dumps(payload, ensure_ascii=False))}"
                     )
                     continue
 
                 logger.info(
                     "conversationrelay_ws_unhandled "
-                    f"call_sid={session.call_sid!r} session_id={session.session_id!r} payload={json.dumps(payload, ensure_ascii=False)}"
+                    f"call_sid={session.call_sid!r} session_id={session.session_id!r} "
+                    f"payload={mask_sensitive_text(json.dumps(payload, ensure_ascii=False))}"
                 )
             except Exception as exc:
                 logger.exception(
                     "conversationrelay_ws_loop_exception "
-                    f"call_sid={session.call_sid!r} session_id={session.session_id!r} raw={raw_message!r} error={exc!r}"
+                    f"call_sid={session.call_sid!r} session_id={session.session_id!r} "
+                    f"raw={mask_sensitive_text(raw_message)!r} error={exc!r}"
                 )
                 raise
     except WebSocketDisconnect:

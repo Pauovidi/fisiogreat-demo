@@ -1,6 +1,7 @@
 import xml.etree.ElementTree as ET
 import datetime as dt
 import asyncio
+import logging
 
 from fastapi.testclient import TestClient
 
@@ -56,9 +57,10 @@ def test_conversationrelay_twiml_exposes_websocket_without_cloud_run_coupling():
     assert relay.attrib.get("transcriptionLanguage") == "es-ES"
 
 
-def test_conversationrelay_booking_keeps_text_last_shape():
+def test_conversationrelay_booking_keeps_whatsapp_stage_order_and_masks_contact_logs(caplog):
     call_sid = "CA-conversationrelay-fisio-1"
     reset_state(call_sid)
+    caplog.set_level(logging.INFO, logger="pelu-agent")
 
     with client.websocket_connect("/webhook/voice/conversationrelay/ws") as websocket:
         websocket.send_json({"type": "setup", "sessionId": "VX-1", "callSid": call_sid})
@@ -67,35 +69,40 @@ def test_conversationrelay_booking_keeps_text_last_shape():
         assert opening["last"] is True
         assert "fisiogreat" in opening["token"].lower()
 
-        websocket.send_json({"type": "prompt", "voicePrompt": "sesion de fisioterapia", "last": True})
+        websocket.send_json({"type": "prompt", "voicePrompt": "quiero sesion de fisioterapia", "last": True})
         ask_reason = websocket.receive_json()
         assert ask_reason["type"] == "text"
         assert ask_reason["last"] is True
         assert "motivo" in ask_reason["token"].lower()
+        assert CTX.get_stage(call_sid) == "awaiting_consultation_reason"
 
         websocket.send_json({"type": "prompt", "voicePrompt": "me duele la rodilla", "last": True})
         ask_name = websocket.receive_json()
         assert ask_name["type"] == "text"
         assert ask_name["last"] is True
         assert "nombre" in ask_name["token"].lower()
+        assert CTX.get_stage(call_sid) == "awaiting_patient_name"
 
         websocket.send_json({"type": "prompt", "voicePrompt": "Pau Marco", "last": True})
         ask_date = websocket.receive_json()
         assert ask_date["type"] == "text"
         assert ask_date["last"] is True
         assert "que dia te va bien" in ask_date["token"].lower()
+        assert CTX.get_stage(call_sid) == "awaiting_date"
 
         websocket.send_json({"type": "prompt", "voicePrompt": "jueves", "last": True})
         offer = websocket.receive_json()
         assert offer["type"] == "text"
         assert offer["last"] is True
         assert "tengo" in offer["token"].lower()
+        assert CTX.get_stage(call_sid) == "offering_slots"
 
-        websocket.send_json({"type": "prompt", "voicePrompt": "primera", "last": True})
+        websocket.send_json({"type": "prompt", "voicePrompt": "la segunda", "last": True})
         ask_contact = websocket.receive_json()
         assert ask_contact["type"] == "text"
         assert ask_contact["last"] is True
         assert "telefono" in ask_contact["token"].lower() or "correo" in ask_contact["token"].lower()
+        assert CTX.get_stage(call_sid) == "awaiting_contact"
 
         websocket.send_json({"type": "prompt", "voicePrompt": "mi email es pau@example.com", "last": True})
         confirm = websocket.receive_json()
@@ -103,6 +110,46 @@ def test_conversationrelay_booking_keeps_text_last_shape():
         assert confirm["last"] is True
         assert "gracias" in confirm["token"].lower()
         assert STORE.appointments
+        assert CTX.get_stage(call_sid) == "completed"
+
+        websocket.send_json({"type": "prompt", "voicePrompt": "gracias", "last": True})
+        thanks = websocket.receive_json()
+        assert thanks["type"] == "text"
+        assert thanks["last"] is True
+        assert "gracias a ti" in thanks["token"].lower()
+        assert "te esperamos" in thanks["token"].lower()
+
+    logs = "\n".join(record.getMessage() for record in caplog.records)
+    assert "conversationrelay_turn" in logs
+    assert "pau@example.com" not in logs
+    assert "p***@example.com" in logs
+
+
+def test_conversationrelay_active_stage_uses_stage_retry_not_generic_natural_fallback(monkeypatch):
+    call_sid = "CA-conversationrelay-no-generic-fallback"
+    reset_state(call_sid)
+
+    async def fail_natural_turn(*_args, **_kwargs):
+        raise AssertionError("natural turn fallback should not run during awaiting_date")
+
+    monkeypatch.setattr("app.services.conversation_relay.maybe_handle_natural_turn", fail_natural_turn)
+
+    with client.websocket_connect("/webhook/voice/conversationrelay/ws") as websocket:
+        websocket.send_json({"type": "setup", "sessionId": "VX-no-fallback", "callSid": call_sid})
+        websocket.receive_json()
+        websocket.send_json({"type": "prompt", "voicePrompt": "quiero sesion de fisioterapia", "last": True})
+        websocket.receive_json()
+        websocket.send_json({"type": "prompt", "voicePrompt": "me duele la rodilla", "last": True})
+        websocket.receive_json()
+        websocket.send_json({"type": "prompt", "voicePrompt": "Pau Marco", "last": True})
+        websocket.receive_json()
+        websocket.send_json({"type": "prompt", "voicePrompt": "cuando puedas", "last": True})
+        retry = websocket.receive_json()
+
+    assert retry["type"] == "text"
+    assert retry["last"] is True
+    assert "dime un dia" in retry["token"].lower()
+    assert CTX.get_stage(call_sid) == "awaiting_date"
 
 
 def test_conversationrelay_calendar_failure_does_not_confirm(monkeypatch):
@@ -158,8 +205,8 @@ def test_conversationrelay_emergency_cuts_flow():
 def test_conversationrelay_lists_and_selects_multiple_reschedule_options():
     call_sid = "CA-conversationrelay-reschedule-multiple"
     reset_state(call_sid)
-    first = create_voice_appointment(call_sid, "sesion de fisioterapia", dt.datetime(2026, 5, 7, 10, 0))
-    second = create_voice_appointment(call_sid, "valoracion inicial", dt.datetime(2026, 5, 8, 10, 0))
+    first = create_voice_appointment(call_sid, "sesion de fisioterapia", dt.datetime(2026, 5, 8, 10, 0))
+    second = create_voice_appointment(call_sid, "valoracion inicial", dt.datetime(2026, 5, 9, 10, 0))
 
     with client.websocket_connect("/webhook/voice/conversationrelay/ws") as websocket:
         websocket.send_json({"type": "setup", "sessionId": "VX-reschedule-many", "callSid": call_sid})
@@ -188,5 +235,5 @@ def test_conversationrelay_lists_and_selects_multiple_reschedule_options():
     assert changed["type"] == "text"
     assert changed["last"] is True
     assert "he cambiado tu cita" in changed["token"].lower()
-    assert STORE.appointments[first["id"]]["start_at"].startswith("2026-05-07")
+    assert STORE.appointments[first["id"]]["start_at"].startswith("2026-05-08")
     assert STORE.appointments[second["id"]]["status"] == "confirmed"

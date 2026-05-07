@@ -1,4 +1,5 @@
 import datetime as dt
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -6,7 +7,7 @@ from typing import Any, Dict, List, Optional
 from ..config.settings import settings
 from ..utils.date_parser import parse_spanish_day, parse_time_pref
 from ..utils.emergency_guard import detect_emergency, emergency_reply
-from ..utils.intent_router import detect_service, route_message
+from ..utils.intent_router import detect_service, normalize_text, route_message
 from ..utils.booking_requirements import (
     clean_consultation_reason,
     confirms_current_phone,
@@ -22,7 +23,7 @@ from ..utils.appointment_options import (
 )
 from ..utils.slot_picker import pick_slot
 from ..utils.voice_copy import VOICE_COPY as copy
-from .natural_turn import maybe_handle_natural_turn
+from .natural_turn import NaturalTurnResult, maybe_handle_natural_turn
 from .salon_knowledge import out_of_scope_answer
 from .booking_service import (
     cancel_appointment,
@@ -37,6 +38,7 @@ from . import supabase_repo
 
 
 CR_SLOT_PAGE_SIZE = 2
+ACTIVE_STAGE_NATURAL_ROUTE_TYPES = {"faq", "human_handoff", "uncertain", "acknowledgement"}
 WEEKDAY_LABELS = [
     "lunes",
     "martes",
@@ -46,6 +48,68 @@ WEEKDAY_LABELS = [
     "sabado",
     "domingo",
 ]
+
+
+def mask_sensitive_text(value: Any) -> str:
+    text = "" if value is None else str(value)
+    text = re.sub(
+        r"\b([A-Za-z0-9._%+-])[A-Za-z0-9._%+-]*@([A-Za-z0-9.-]+\.[A-Za-z]{2,})\b",
+        r"\1***@\2",
+        text,
+    )
+
+    def _mask_phone(match: re.Match[str]) -> str:
+        raw = match.group(0)
+        digits = re.sub(r"\D", "", raw)
+        if len(digits) < 9:
+            return raw
+        return f"***{digits[-2:]}"
+
+    return re.sub(r"(?<!\w)\+?(?:\d[\s().-]?){9,15}(?!\w)", _mask_phone, text)
+
+
+def _turn_branch(stage_before: str, stage_after: str, route_type: str) -> str:
+    if stage_before and stage_before != "idle":
+        return f"{stage_before}:{route_type}->{stage_after}"
+    return route_type
+
+
+def _log_conversationrelay_turn(
+    *,
+    key: str,
+    user_text: str,
+    normalized_text: str,
+    stage_before: str,
+    stage_after: str,
+    intent_detected: str,
+    bot_reply: str,
+    ctx_before: Optional[Dict[str, Any]] = None,
+) -> None:
+    ctx_before = ctx_before or {}
+    ctx = CTX.get(key) or {}
+    contact_phone, contact_email = extract_contact(user_text)
+    payload = {
+        "call_sid": key,
+        "user_text": mask_sensitive_text(user_text),
+        "normalized_text": mask_sensitive_text(normalized_text),
+        "stage_before": stage_before,
+        "stage_after": stage_after,
+        "intent_detected": intent_detected,
+        "selected_service": ctx.get("service") or ctx_before.get("service"),
+        "consultation_reason_present": bool(ctx.get("consultation_reason") or ctx_before.get("consultation_reason")),
+        "patient_name_present": bool(ctx.get("patient_name") or ctx_before.get("patient_name")),
+        "contact_present": bool(
+            ctx.get("contact_phone")
+            or ctx.get("contact_email")
+            or ctx_before.get("contact_phone")
+            or ctx_before.get("contact_email")
+            or contact_phone
+            or contact_email
+        ),
+        "branch": _turn_branch(stage_before, stage_after, intent_detected),
+        "bot_reply": mask_sensitive_text(bot_reply),
+    }
+    logger.info("conversationrelay_turn " + " ".join(f"{key}={payload[key]!r}" for key in payload))
 
 
 @dataclass
@@ -92,7 +156,7 @@ async def handle_prompt_message(session: ConversationRelaySession, payload: Dict
 
     logger.info(
         "conversationrelay_prompt "
-        f"call_sid={session.call_sid!r} session_id={session.session_id!r} utterance={utterance!r}"
+        f"call_sid={session.call_sid!r} session_id={session.session_id!r} utterance={mask_sensitive_text(utterance)!r}"
     )
     return await _handle_user_input(session.key, utterance)
 
@@ -277,6 +341,34 @@ def _contact_prompt(key: str) -> str:
 
 
 async def _handle_user_input(key: str, user_text: str) -> str:
+    stage_before = CTX.get_stage(key)
+    ctx_before = dict(CTX.get(key) or {})
+    route = route_message(user_text)
+    reply = await _handle_user_input_core(key, user_text)
+    _log_conversationrelay_turn(
+        key=key,
+        user_text=user_text,
+        normalized_text=normalize_text(user_text),
+        stage_before=stage_before,
+        stage_after=CTX.get_stage(key),
+        intent_detected=route["type"],
+        bot_reply=reply,
+        ctx_before=ctx_before,
+    )
+    return reply
+
+
+async def _maybe_handle_active_stage_natural_turn(
+    key: str,
+    user_text: str,
+    route_type: str,
+) -> NaturalTurnResult:
+    if route_type not in ACTIVE_STAGE_NATURAL_ROUTE_TYPES:
+        return NaturalTurnResult(False, route_type=route_type)
+    return await maybe_handle_natural_turn(key, user_text, page_size=CR_SLOT_PAGE_SIZE)
+
+
+async def _handle_user_input_core(key: str, user_text: str) -> str:
     current_stage = CTX.get_stage(key)
     emergency = detect_emergency(user_text)
     if emergency.detected:
@@ -381,6 +473,8 @@ async def _handle_user_input(key: str, user_text: str) -> str:
             return copy.ask_service()
         if route_peek["type"] == "out_of_scope":
             return out_of_scope_answer("voice")
+        if route_peek["type"] == "unsupported_service":
+            return copy.unsupported_service(route_peek.get("service"))
         if route_peek["type"] == "cancel":
             return await _start_appointment_action(key, action="cancel")
         if route_peek["type"] == "reschedule":
@@ -415,7 +509,7 @@ async def _handle_user_input(key: str, user_text: str) -> str:
             CTX.set_stage(key, "awaiting_patient_name")
             return copy.ask_patient_name(service)
 
-        natural = await maybe_handle_natural_turn(key, user_text, page_size=CR_SLOT_PAGE_SIZE)
+        natural = await _maybe_handle_active_stage_natural_turn(key, user_text, route_peek["type"])
         if natural.handled:
             return natural.reply or copy.ask_service()
         return copy.ask_service_retry()
@@ -475,7 +569,7 @@ async def _handle_user_input(key: str, user_text: str) -> str:
             CTX.set_time_pref(key, time_pref)
             return copy.ask_date_with_time_pref(ctx.get("service"), time_pref)
 
-        natural = await maybe_handle_natural_turn(key, user_text, page_size=CR_SLOT_PAGE_SIZE)
+        natural = await _maybe_handle_active_stage_natural_turn(key, user_text, route_peek["type"])
         if natural.handled:
             return natural.reply or copy.ask_date()
 
@@ -532,7 +626,7 @@ async def _handle_user_input(key: str, user_text: str) -> str:
         if route_peek["type"] == "reject_slot":
             return copy.earlier_or_later()
 
-        natural = await maybe_handle_natural_turn(key, user_text, page_size=CR_SLOT_PAGE_SIZE)
+        natural = await _maybe_handle_active_stage_natural_turn(key, user_text, route_peek["type"])
         if natural.handled:
             return natural.reply or copy.propose_slots(current)
 
@@ -617,6 +711,9 @@ async def _handle_user_input(key: str, user_text: str) -> str:
 
     if route["type"] == "reschedule":
         return await _start_appointment_action(key, action="reschedule")
+
+    if route["type"] == "unsupported_service":
+        return copy.unsupported_service(route.get("service"))
 
     natural = await maybe_handle_natural_turn(key, user_text, page_size=CR_SLOT_PAGE_SIZE)
     if natural.handled:

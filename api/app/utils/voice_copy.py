@@ -149,6 +149,20 @@ class VoiceCopy:
         return "Puedo ayudarte con citas, horarios y servicios."
 
     @staticmethod
+    def unsupported_service(service: Optional[str] = None) -> str:
+        if service:
+            return (
+                f"En esta demo no puedo reservar {service}. "
+                "Puedo gestionar valoracion inicial, sesion de fisioterapia o seguimiento. "
+                "Si necesitas otro servicio, te derivamos a una persona del equipo."
+            )
+        return (
+            "En esta demo no puedo reservar ese servicio. "
+            "Puedo gestionar valoracion inicial, sesion de fisioterapia o seguimiento. "
+            "Si necesitas otro servicio, te derivamos a una persona del equipo."
+        )
+
+    @staticmethod
     def no_idea_service() -> str:
         return f"{uncertain_service_answer('voice')} Que te apetece?"
 
