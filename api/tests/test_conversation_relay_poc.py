@@ -3,6 +3,7 @@ import datetime as dt
 import asyncio
 import logging
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.config.settings import settings
@@ -150,6 +151,44 @@ def test_conversationrelay_active_stage_uses_stage_retry_not_generic_natural_fal
     assert retry["last"] is True
     assert "dime un dia" in retry["token"].lower()
     assert CTX.get_stage(call_sid) == "awaiting_date"
+
+
+@pytest.mark.parametrize(
+    ("spoken_name", "expected_name"),
+    [
+        ("Ah, Marcos Castellano.", "Marcos Castellano"),
+        ("Marcos Castellano", "Marcos Castellano"),
+    ],
+)
+def test_conversationrelay_accepts_normal_patient_names_and_continues_to_date(spoken_name, expected_name):
+    call_sid = f"CA-conversationrelay-name-{expected_name.replace(' ', '-').lower()}-{len(spoken_name)}"
+    reset_state(call_sid)
+
+    with client.websocket_connect("/webhook/voice/conversationrelay/ws") as websocket:
+        websocket.send_json({"type": "setup", "sessionId": f"VX-{call_sid}", "callSid": call_sid})
+        websocket.receive_json()
+        websocket.send_json({"type": "prompt", "voicePrompt": "quiero sesion de fisioterapia", "last": True})
+        websocket.receive_json()
+        websocket.send_json({"type": "prompt", "voicePrompt": "me duele la rodilla", "last": True})
+        ask_name = websocket.receive_json()
+        assert "nombre" in ask_name["token"].lower()
+        assert CTX.get_stage(call_sid) == "awaiting_patient_name"
+
+        websocket.send_json({"type": "prompt", "voicePrompt": spoken_name, "last": True})
+        ask_date = websocket.receive_json()
+        assert ask_date["type"] == "text"
+        assert ask_date["last"] is True
+        assert "que dia te va bien" in ask_date["token"].lower()
+        assert "no he entendido" not in ask_date["token"].lower()
+        assert CTX.get_stage(call_sid) == "awaiting_date"
+        assert CTX.get(call_sid)["patient_name"] == expected_name
+
+        websocket.send_json({"type": "prompt", "voicePrompt": "el miércoles", "last": True})
+        slots = websocket.receive_json()
+        assert slots["type"] == "text"
+        assert slots["last"] is True
+        assert "tengo" in slots["token"].lower()
+        assert CTX.get_stage(call_sid) == "offering_slots"
 
 
 def test_conversationrelay_calendar_failure_does_not_confirm(monkeypatch):

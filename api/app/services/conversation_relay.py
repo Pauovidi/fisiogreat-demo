@@ -16,7 +16,7 @@ from ..utils.booking_requirements import (
 )
 from ..utils.logger import logger
 from ..utils.mini_context import CTX
-from ..utils.patient_name import first_name, parse_patient_name
+from ..utils.patient_name import first_name, extract_patient_name_from_voice
 from ..utils.appointment_options import (
     format_appointment_option_voice,
     pick_appointment_option,
@@ -340,6 +340,13 @@ def _contact_prompt(key: str) -> str:
     return copy.ask_contact()
 
 
+def _patient_name_retry_prompt(key: str) -> str:
+    ctx = CTX.get(key) or {}
+    attempts = int(ctx.get("patient_name_parse_failures") or 0) + 1
+    ctx["patient_name_parse_failures"] = attempts
+    return copy.ask_patient_name_retry(attempts)
+
+
 async def _handle_user_input(key: str, user_text: str) -> str:
     stage_before = CTX.get_stage(key)
     ctx_before = dict(CTX.get(key) or {})
@@ -533,10 +540,12 @@ async def _handle_user_input_core(key: str, user_text: str) -> str:
         return copy.consultation_reason_then_date()
 
     if current_stage == "awaiting_patient_name":
-        patient_name = parse_patient_name(user_text)
+        patient_name = extract_patient_name_from_voice(user_text)
         if not patient_name:
-            return "No he entendido bien el nombre. A que nombre dejamos la cita?"
+            return _patient_name_retry_prompt(key)
         await _store_manual_patient_name(key, patient_name)
+        ctx_for_attempts = CTX.get(key) or {}
+        ctx_for_attempts["patient_name_parse_failures"] = 0
         ctx = CTX.get(key) or {}
         service = ctx.get("service")
         date_pref = ctx.get("date_pref")

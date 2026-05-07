@@ -1,6 +1,7 @@
 import xml.etree.ElementTree as ET
 import datetime as dt
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -140,6 +141,53 @@ def test_voice_physiotherapy_requires_reason_and_contact_before_confirmation():
     assert "telefono" in contact_prompt.text.lower() or "correo" in contact_prompt.text.lower()
     assert CTX.get_stage(call_sid) == "awaiting_contact"
     assert not STORE.appointments
+
+
+@pytest.mark.parametrize(
+    ("spoken_name", "expected_name"),
+    [
+        ("Ah, Marcos Castellano.", "Marcos Castellano"),
+        ("Marcos Castellano", "Marcos Castellano"),
+    ],
+)
+def test_voice_accepts_normal_patient_names_and_continues_to_date(spoken_name, expected_name):
+    call_sid = f"CA-voice-name-{len(spoken_name)}"
+    reset_state(call_sid)
+
+    post_voice(call_sid)
+    post_voice(call_sid, SpeechResult="quiero sesion de fisioterapia")
+    ask_name = post_voice(call_sid, SpeechResult="me duele la rodilla")
+    assert "nombre" in ask_name.text.lower()
+    assert CTX.get_stage(call_sid) == "awaiting_patient_name"
+
+    ask_date = post_voice(call_sid, SpeechResult=spoken_name)
+    assert "que dia te va bien" in ask_date.text.lower()
+    assert "no he entendido" not in ask_date.text.lower()
+    assert CTX.get_stage(call_sid) == "awaiting_date"
+    assert CTX.get(call_sid)["patient_name"] == expected_name
+
+    slots = post_voice(call_sid, SpeechResult="el miércoles")
+    assert "tengo" in slots.text.lower()
+    assert CTX.get_stage(call_sid) == "offering_slots"
+
+
+def test_voice_patient_name_retry_copy_changes_after_first_failure():
+    call_sid = "CA-voice-name-retry-copy"
+    reset_state(call_sid)
+
+    post_voice(call_sid)
+    post_voice(call_sid, SpeechResult="quiero sesion de fisioterapia")
+    post_voice(call_sid, SpeechResult="me duele la rodilla")
+
+    first_retry = post_voice(call_sid, SpeechResult="640 78 67 65")
+    assert "dime solo el nombre y apellidos" in first_retry.text.lower()
+    assert "marcos castellano" in first_retry.text.lower()
+    assert CTX.get_stage(call_sid) == "awaiting_patient_name"
+
+    second_retry = post_voice(call_sid, SpeechResult="mañana")
+    assert "dime solo el nombre y apellidos" in second_retry.text.lower()
+    assert "marcos castellano" not in second_retry.text.lower()
+    assert CTX.get_stage(call_sid) == "awaiting_patient_name"
 
 
 def test_voice_confirms_with_valid_email_and_stores_contact():

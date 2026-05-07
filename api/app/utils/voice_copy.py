@@ -72,6 +72,12 @@ class VoiceCopy:
         return "Perfecto. A que nombre dejamos la cita?"
 
     @staticmethod
+    def ask_patient_name_retry(attempt: int = 1) -> str:
+        if attempt <= 1:
+            return "Perdona, no lo he entendido. Dime solo el nombre y apellidos, por ejemplo Marcos Castellano."
+        return "Dime solo el nombre y apellidos, por favor."
+
+    @staticmethod
     def ask_consultation_reason() -> str:
         return "Para que el fisioterapeuta pueda preparar mejor la sesion, cual es el motivo de la consulta?"
 

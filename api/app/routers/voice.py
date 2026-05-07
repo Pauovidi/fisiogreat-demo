@@ -40,7 +40,7 @@ from ..utils.booking_requirements import (
 )
 from ..utils.logger import logger
 from ..utils.mini_context import CTX
-from ..utils.patient_name import first_name, parse_patient_name
+from ..utils.patient_name import first_name, extract_patient_name_from_voice
 from ..utils.appointment_options import (
     format_appointment_option_voice,
     pick_appointment_option,
@@ -471,6 +471,13 @@ def _shift_slot_offer(call_sid: str, *, direction: str, stats: Dict[str, Any]) -
     return _offer_slots(call_sid, service, date_pref, "morning", stats)
 
 
+def _patient_name_retry_prompt(key: str) -> str:
+    ctx = CTX.get(key) or {}
+    attempts = int(ctx.get("patient_name_parse_failures") or 0) + 1
+    ctx["patient_name_parse_failures"] = attempts
+    return copy.ask_patient_name_retry(attempts)
+
+
 def _absolute_url(path: str) -> str:
     return f"{settings.PUBLIC_BASE_URL.rstrip('/')}{path}"
 
@@ -887,12 +894,14 @@ async def agent_entry(
             return _respond_gather(CallSid, copy.consultation_reason_then_date(), stats)
 
         if current_stage == "awaiting_patient_name":
-            patient_name = parse_patient_name(user_text)
+            patient_name = extract_patient_name_from_voice(user_text)
             if not patient_name:
                 stats["branch"] = "patient_name_retry"
                 stats["stage_after"] = "awaiting_patient_name"
-                return _respond_gather(CallSid, "No he entendido bien el nombre. A que nombre dejamos la cita?", stats)
+                return _respond_gather(CallSid, _patient_name_retry_prompt(CallSid), stats)
             await _store_manual_patient_name(CallSid, patient_name)
+            ctx_for_attempts = CTX.get(CallSid) or {}
+            ctx_for_attempts["patient_name_parse_failures"] = 0
             ctx = CTX.get(CallSid) or {}
             service = ctx.get("service")
             date_pref = ctx.get("date_pref")
