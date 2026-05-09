@@ -14,6 +14,12 @@ from ..utils.booking_requirements import (
     extract_contact,
     is_physiotherapy_session,
 )
+from ..utils.confirmation import (
+    is_cancel_confirmation_no,
+    is_cancel_confirmation_yes,
+    is_confirmation_no,
+    is_confirmation_yes,
+)
 from ..utils.logger import logger
 from ..utils.mini_context import CTX
 from ..utils.patient_name import first_name, extract_patient_name_from_voice
@@ -241,11 +247,11 @@ def _latest_appointment_id(external_user_id: str) -> Optional[str]:
 
 
 def _is_yes(text: str) -> bool:
-    return (text or "").strip().lower() in {"si", "sí", "vale", "ok", "de acuerdo", "correcto", "confirmo"}
+    return is_confirmation_yes(text)
 
 
 def _is_no(text: str) -> bool:
-    return (text or "").strip().lower() in {"no", "mejor no", "dejalo", "déjalo", "cancelar"}
+    return is_confirmation_no(text)
 
 
 async def _start_appointment_action(key: str, *, action: str) -> str:
@@ -445,11 +451,11 @@ async def _handle_user_input_core(key: str, user_text: str) -> str:
 
     if current_stage == "awaiting_cancel_confirmation":
         appointment = _selected_appointment(key, action="cancel")
-        if _is_yes(user_text) and appointment:
+        if is_cancel_confirmation_yes(user_text) and appointment:
             return await _cancel_selected_appointment(key, appointment)
-        if _is_no(user_text):
+        if is_cancel_confirmation_no(user_text):
             CTX.clear_flow(key)
-            return "De acuerdo, no cancelo nada."
+            return "De acuerdo, mantengo tu cita como estaba."
         return "Dime si quieres cancelar esa cita."
 
     if current_stage == "awaiting_cancel_selection":

@@ -92,7 +92,9 @@ async def confirm_slot(
     if channel == "whatsapp" and not contact_phone and external_user_id:
         contact_phone = external_user_id
     contact_channel_preference = None
-    if contact_email and contact_phone:
+    if channel == "whatsapp" and contact_phone:
+        contact_channel_preference = "whatsapp"
+    elif contact_email and contact_phone:
         contact_channel_preference = "phone_or_email"
     elif contact_email:
         contact_channel_preference = "email"
@@ -190,7 +192,8 @@ async def confirm_slot(
         description_lines.append(f"Canal: {channel}")
         contact_values = []
         if contact_phone:
-            contact_values.append(f"telefono {contact_phone}")
+            contact_label = "WhatsApp" if channel == "whatsapp" else "telefono"
+            contact_values.append(f"{contact_label} {contact_phone}")
         if contact_email:
             contact_values.append(f"email {contact_email}")
         if contact_values:

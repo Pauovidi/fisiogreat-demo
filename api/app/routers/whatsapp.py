@@ -22,7 +22,13 @@ from ..utils.date_parser import parse_spanish_day, parse_time_pref
 from ..utils.faq import get_faq_answer
 from ..utils.intent_router import detect_service, normalize_text, route_message
 from ..utils.emergency_guard import detect_emergency, emergency_reply
-from ..utils.booking_requirements import clean_consultation_reason, is_physiotherapy_session
+from ..utils.booking_requirements import clean_consultation_reason, extract_contact, is_physiotherapy_session
+from ..utils.confirmation import (
+    is_cancel_confirmation_no,
+    is_cancel_confirmation_yes,
+    is_confirmation_no,
+    is_confirmation_yes,
+)
 from ..utils.logger import logger
 from ..utils.mini_context import CTX
 from ..utils.patient_name import first_name, parse_patient_name
@@ -325,13 +331,49 @@ def _recent_booking_reply(key: str, *, farewell: bool = False) -> str:
 
 
 def _is_yes(body: str) -> bool:
-    normalized = normalize_text(body)
-    return normalized in {"si", "sí", "vale", "ok", "de acuerdo", "confirmo", "correcto", "adelante"}
+    return is_confirmation_yes(body)
 
 
 def _is_no(body: str) -> bool:
-    normalized = normalize_text(body)
-    return normalized in {"no", "mejor no", "cancelar", "dejalo", "déjalo"}
+    return is_confirmation_no(body)
+
+
+async def _store_optional_contact_email(key: str, email: str) -> bool:
+    CTX.set_contact(key, contact_email=email)
+    appointment_id = _latest_appointment_id(key)
+    if not appointment_id:
+        return False
+    appointment = await supabase_repo.get_appointment(appointment_id)
+    if not appointment:
+        return False
+    metadata = dict(appointment.get("metadata") or {})
+    metadata["contact_email"] = email
+    if metadata.get("contact_phone"):
+        metadata["contact_channel_preference"] = "whatsapp"
+    await supabase_repo.update_appointment(appointment_id, metadata=metadata)
+    return True
+
+
+async def _maybe_handle_optional_contact_email(key: str, body: str) -> Optional[str]:
+    _phone, email = extract_contact(body)
+    if not email:
+        return None
+    updated_existing = await _store_optional_contact_email(key, email)
+    ctx = CTX.get(key) or {}
+    stage = CTX.get_stage(key)
+    if updated_existing and stage in {"idle", "completed"}:
+        return "Perfecto, he añadido ese email a tu cita. Te enviaremos la confirmación y el recordatorio por este WhatsApp."
+    if stage == "awaiting_date":
+        return f"Perfecto, guardo ese email como contacto opcional. {copy.ask_date(ctx.get('service'))}"
+    if stage == "offering_slots":
+        current = _current_slots(key)
+        if current:
+            return f"Perfecto, guardo ese email como contacto opcional.\n\n{copy.propose_slots(current)}"
+    if stage == "awaiting_patient_name":
+        return f"Perfecto, guardo ese email como contacto opcional. {copy.ask_patient_name(ctx.get('service'))}"
+    if stage == "awaiting_consultation_reason":
+        return f"Perfecto, guardo ese email como contacto opcional. {copy.ask_consultation_reason_retry()}"
+    return "Perfecto, guardo ese email como contacto opcional. Te enviaremos la confirmación y el recordatorio por este WhatsApp."
 
 
 async def _start_appointment_action(key: str, *, action: str) -> str:
@@ -589,6 +631,10 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
             await _clear_conversation_flow(wa_from, reason="pending_flow_cancel")
             return _twiml(copy.cancel_pending_flow())
 
+        optional_contact_reply = await _maybe_handle_optional_contact_email(wa_from, body)
+        if optional_contact_reply:
+            return _twiml(optional_contact_reply)
+
         route_early = route_message(body)
         if route_early["type"] == "thanks":
             return _twiml(_recent_booking_reply(wa_from))
@@ -717,6 +763,7 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
                     patient_name=patient_name,
                     consultation_reason=ctx.get("consultation_reason"),
                     contact_phone=wa_from,
+                    contact_email=ctx.get("contact_email"),
                     metadata={"slot_label": selected},
                 )
                 if not booking_result.ok:
@@ -752,11 +799,11 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
 
         elif current_stage == "awaiting_cancel_confirmation":
             appointment = _selected_appointment(wa_from, action="cancel")
-            if _is_yes(body) and appointment:
+            if is_cancel_confirmation_yes(body) and appointment:
                 return _twiml(await _cancel_selected_appointment(wa_from, appointment))
-            if _is_no(body):
+            if is_cancel_confirmation_no(body):
                 CTX.clear_flow(wa_from)
-                return _twiml("De acuerdo, no cancelo nada. ¿En qué puedo ayudarte?")
+                return _twiml("De acuerdo, mantengo tu cita como estaba.")
             return _twiml("Dime si quieres cancelar esa cita, por favor.")
 
         elif current_stage == "awaiting_cancel_selection":

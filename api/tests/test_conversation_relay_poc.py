@@ -27,6 +27,10 @@ def reset_state(key: str):
     CTX.clear(key)
 
 
+def future_start(days: int = 7, hour: int = 10) -> dt.datetime:
+    return (dt.datetime.now() + dt.timedelta(days=days)).replace(hour=hour, minute=0, second=0, microsecond=0)
+
+
 def create_voice_appointment(call_sid: str, service: str, start: dt.datetime):
     result = asyncio.run(confirm_slot(
         channel="voice",
@@ -353,8 +357,9 @@ def test_conversationrelay_emergency_cuts_flow():
 def test_conversationrelay_lists_and_selects_multiple_reschedule_options():
     call_sid = "CA-conversationrelay-reschedule-multiple"
     reset_state(call_sid)
-    first = create_voice_appointment(call_sid, "sesion de fisioterapia", dt.datetime(2026, 5, 8, 10, 0))
-    second = create_voice_appointment(call_sid, "valoracion inicial", dt.datetime(2026, 5, 9, 10, 0))
+    first = create_voice_appointment(call_sid, "sesion de fisioterapia", future_start(7))
+    second = create_voice_appointment(call_sid, "valoracion inicial", future_start(8))
+    original_first_start = first["start_at"]
 
     with client.websocket_connect("/webhook/voice/conversationrelay/ws") as websocket:
         websocket.send_json({"type": "setup", "sessionId": "VX-reschedule-many", "callSid": call_sid})
@@ -383,5 +388,30 @@ def test_conversationrelay_lists_and_selects_multiple_reschedule_options():
     assert changed["type"] == "text"
     assert changed["last"] is True
     assert "he cambiado tu cita" in changed["token"].lower()
-    assert STORE.appointments[first["id"]]["start_at"].startswith("2026-05-08")
+    assert STORE.appointments[first["id"]]["start_at"] == original_first_start
     assert STORE.appointments[second["id"]]["status"] == "confirmed"
+
+
+def test_conversationrelay_pending_cancel_accepts_natural_confirmation():
+    call_sid = "CA-conversationrelay-cancel-natural"
+    reset_state(call_sid)
+    appointment = create_voice_appointment(
+        call_sid,
+        "valoracion inicial",
+        dt.datetime.now() + dt.timedelta(days=7),
+    )
+
+    with client.websocket_connect("/webhook/voice/conversationrelay/ws") as websocket:
+        websocket.send_json({"type": "setup", "sessionId": "VX-cancel-natural", "callSid": call_sid})
+        websocket.receive_json()
+        websocket.send_json({"type": "prompt", "voicePrompt": "quiero cancelar mi cita", "last": True})
+        found = websocket.receive_json()
+        websocket.send_json({"type": "prompt", "voicePrompt": "sí, cancélala", "last": True})
+        cancelled = websocket.receive_json()
+
+    assert found["type"] == "text"
+    assert "he encontrado tu cita" in found["token"].lower()
+    assert cancelled["type"] == "text"
+    assert "he cancelado" in cancelled["token"].lower()
+    assert "dime si quieres cancelar" not in cancelled["token"].lower()
+    assert STORE.appointments[appointment["id"]]["status"] == "cancelled"

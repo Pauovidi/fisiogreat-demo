@@ -25,6 +25,10 @@ def reset_state(*keys: str):
         CTX.clear(key)
 
 
+def future_start(days: int = 7, hour: int = 10) -> dt.datetime:
+    return (dt.datetime.now() + dt.timedelta(days=days)).replace(hour=hour, minute=0, second=0, microsecond=0)
+
+
 def post_whatsapp(user: str, body: str, profile_name: str = ""):
     response = client.post(
         "/webhook/whatsapp",
@@ -353,8 +357,9 @@ def test_voice_can_cancel_and_reschedule_existing_booking():
 
     prompt = post_voice(cancel_sid, SpeechResult="quiero cancelar la cita")
     assert "he encontrado tu cita" in prompt.text.lower()
-    cancelled = post_voice(cancel_sid, SpeechResult="si")
+    cancelled = post_voice(cancel_sid, SpeechResult="sí, cancélala")
     assert "he cancelado" in cancelled.text.lower()
+    assert "dime si quieres cancelar" not in cancelled.text.lower()
     assert next(iter(STORE.appointments.values()))["status"] == "cancelled"
 
     reschedule_sid = "CA-voice-reschedule-1"
@@ -378,11 +383,43 @@ def test_voice_can_cancel_and_reschedule_existing_booking():
     assert next(iter(STORE.appointments.values()))["status"] == "confirmed"
 
 
+def test_voice_pending_cancel_accepts_cancelala_and_decline():
+    call_sid = "CA-voice-cancel-natural"
+    reset_state(call_sid)
+    appointment = create_voice_appointment(
+        call_sid,
+        "valoracion inicial",
+        dt.datetime.now() + dt.timedelta(days=7),
+    )
+
+    prompt = post_voice(call_sid, SpeechResult="quiero cancelar mi cita")
+    cancelled = post_voice(call_sid, SpeechResult="cancélala")
+
+    assert "he encontrado tu cita" in prompt.text.lower()
+    assert "he cancelado" in cancelled.text.lower()
+    assert "dime si quieres cancelar" not in cancelled.text.lower()
+    assert STORE.appointments[appointment["id"]]["status"] == "cancelled"
+
+    decline_sid = "CA-voice-cancel-decline"
+    reset_state(decline_sid)
+    kept_appointment = create_voice_appointment(
+        decline_sid,
+        "valoracion inicial",
+        dt.datetime.now() + dt.timedelta(days=8),
+    )
+    post_voice(decline_sid, SpeechResult="quiero cancelar mi cita")
+    kept = post_voice(decline_sid, SpeechResult="no la canceles")
+
+    assert "de acuerdo, mantengo tu cita como estaba" in kept.text.lower()
+    assert STORE.appointments[kept_appointment["id"]]["status"] == "confirmed"
+
+
 def test_voice_lists_multiple_future_appointments_and_uses_selection_not_last_slot():
     call_sid = "CA-voice-multiple-appointments"
     reset_state(call_sid)
-    first = create_voice_appointment(call_sid, "sesion de fisioterapia", dt.datetime(2026, 5, 8, 10, 0))
-    second = create_voice_appointment(call_sid, "valoracion inicial", dt.datetime(2026, 5, 9, 10, 0))
+    first = create_voice_appointment(call_sid, "sesion de fisioterapia", future_start(7))
+    second = create_voice_appointment(call_sid, "valoracion inicial", future_start(8))
+    original_first_start = first["start_at"]
     original_second_start = second["start_at"]
 
     listed = post_voice(call_sid, SpeechResult="quiero cambiar mi cita")
@@ -398,15 +435,15 @@ def test_voice_lists_multiple_future_appointments_and_uses_selection_not_last_sl
     post_voice(call_sid, SpeechResult="viernes")
     changed = post_voice(call_sid, SpeechResult="primera")
     assert "he cambiado tu cita" in changed.text.lower()
-    assert STORE.appointments[first["id"]]["start_at"].startswith("2026-05-08")
+    assert STORE.appointments[first["id"]]["start_at"] == original_first_start
     assert STORE.appointments[second["id"]]["start_at"] != original_second_start
 
 
 def test_voice_lists_multiple_future_appointments_for_cancel_and_understands_first():
     call_sid = "CA-voice-cancel-multiple"
     reset_state(call_sid)
-    first = create_voice_appointment(call_sid, "sesion de fisioterapia", dt.datetime(2026, 5, 8, 10, 0))
-    second = create_voice_appointment(call_sid, "valoracion inicial", dt.datetime(2026, 5, 9, 10, 0))
+    first = create_voice_appointment(call_sid, "sesion de fisioterapia", future_start(7))
+    second = create_voice_appointment(call_sid, "valoracion inicial", future_start(8))
 
     listed = post_voice(call_sid, SpeechResult="quiero cancelar mi cita")
     assert "varias citas futuras" in listed.text.lower()

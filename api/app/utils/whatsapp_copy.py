@@ -85,7 +85,10 @@ class WhatsAppCopy:
         first_name = _first_name(patient_name)
         prefix = f"Perfecto, {first_name}. " if first_name else "Perfecto. "
         service_text = f" para {service}" if service else ""
-        return f"{prefix}Te dejo apuntada la cita{service_text} el {slot}."
+        return (
+            f"{prefix}Te dejo apuntada la cita{service_text} el {slot}. "
+            "Te enviaremos la confirmación y el recordatorio por este WhatsApp."
+        )
 
     @staticmethod
     def thanks_after_booking(slot: str, patient_name: Optional[str] = None) -> str:

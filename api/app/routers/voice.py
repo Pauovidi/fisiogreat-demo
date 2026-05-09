@@ -38,6 +38,12 @@ from ..utils.booking_requirements import (
     extract_contact,
     is_physiotherapy_session,
 )
+from ..utils.confirmation import (
+    is_cancel_confirmation_no,
+    is_cancel_confirmation_yes,
+    is_confirmation_no,
+    is_confirmation_yes,
+)
 from ..utils.logger import logger
 from ..utils.mini_context import CTX
 from ..utils.patient_name import first_name, extract_patient_name_from_voice
@@ -122,11 +128,11 @@ def _latest_appointment_id(external_user_id: str) -> Optional[str]:
 
 
 def _is_yes(text: str) -> bool:
-    return _normalize_voice_text(text) in {"si", "sí", "vale", "ok", "de acuerdo", "correcto", "confirmo"}
+    return is_confirmation_yes(text)
 
 
 def _is_no(text: str) -> bool:
-    return _normalize_voice_text(text) in {"no", "mejor no", "dejalo", "déjalo", "cancelar"}
+    return is_confirmation_no(text)
 
 
 async def _start_appointment_action(call_sid: str, *, action: str, stats: Dict[str, Any]) -> Response:
@@ -736,14 +742,14 @@ async def agent_entry(
 
         if current_stage == "awaiting_cancel_confirmation":
             appointment = _selected_appointment(CallSid, action="cancel")
-            if _is_yes(user_text) and appointment:
+            if is_cancel_confirmation_yes(user_text) and appointment:
                 stats["branch"] = "cancel_confirmed"
                 return await _cancel_selected_appointment(CallSid, appointment, stats)
-            if _is_no(user_text):
+            if is_cancel_confirmation_no(user_text):
                 CTX.clear_flow(CallSid)
                 stats["branch"] = "cancel_declined"
                 stats["stage_after"] = "idle"
-                return _respond_gather(CallSid, "De acuerdo, no cancelo nada.", stats)
+                return _respond_gather(CallSid, "De acuerdo, mantengo tu cita como estaba.", stats)
             stats["branch"] = "cancel_confirmation_retry"
             stats["stage_after"] = "awaiting_cancel_confirmation"
             return _respond_gather(CallSid, "Dime si quieres cancelar esa cita.", stats)
