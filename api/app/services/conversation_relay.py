@@ -15,6 +15,7 @@ from ..utils.booking_requirements import (
     is_physiotherapy_session,
 )
 from ..utils.confirmation import (
+    cancel_selection_implies_confirmation,
     is_cancel_confirmation_no,
     is_cancel_confirmation_yes,
     is_confirmation_no,
@@ -259,8 +260,8 @@ async def _start_appointment_action(key: str, *, action: str) -> str:
     CTX.clear_flow(key)
     if not appointments:
         if action == "cancel":
-            return "No encuentro citas futuras a tu nombre."
-        return "No encuentro citas futuras a tu nombre. Si quieres, puedo ayudarte a pedir una nueva cita."
+            return "No encuentro citas futuras asociadas a este telefono."
+        return "No encuentro citas futuras asociadas a este telefono. Si quieres, puedo ayudarte a pedir una nueva cita."
 
     CTX.set_pending_appointments(key, action=action, appointments=appointments)
     if len(appointments) == 1:
@@ -275,7 +276,7 @@ async def _start_appointment_action(key: str, *, action: str) -> str:
     CTX.set_stage(key, "awaiting_cancel_selection" if action == "cancel" else "awaiting_reschedule_selection")
     action_text = "cancelar" if action == "cancel" else "cambiar"
     options = "; ".join(format_appointment_option_voice(appointment, index) for index, appointment in enumerate(appointments, start=1))
-    return f"Veo que tienes varias citas futuras. Te las enumero: {options}. Cual quieres {action_text}?"
+    return f"Veo varias citas asociadas a este telefono. {options}. Cual quieres {action_text}?"
 
 
 def _pending_appointments(key: str, *, action: str) -> List[Dict[str, Any]]:
@@ -307,6 +308,11 @@ async def _cancel_selected_appointment(key: str, appointment: Dict[str, Any]) ->
     when = format_appointment_option_voice(appointment)
     CTX.clear_flow(key)
     return f"{prefix}He cancelado tu cita de {service} {when.split(' el ', 1)[-1]}."
+
+
+def _confirm_cancel_selected_prompt(appointment: Dict[str, Any]) -> str:
+    label = format_appointment_option_voice(appointment)
+    return f"Quieres cancelar la cita de {label}?"
 
 
 def _ask_new_day_for_selected(key: str, appointment: Dict[str, Any]) -> str:
@@ -459,11 +465,17 @@ async def _handle_user_input_core(key: str, user_text: str) -> str:
         return "Dime si quieres cancelar esa cita."
 
     if current_stage == "awaiting_cancel_selection":
+        if is_cancel_confirmation_no(user_text):
+            CTX.clear_flow(key)
+            return "De acuerdo, mantengo tu cita como estaba."
         appointment = pick_appointment_option(user_text, _pending_appointments(key, action="cancel"))
         if not appointment:
             return "No he identificado cual quieres cancelar. Dime primera, segunda o el servicio."
         CTX.set_selected_appointment(key, appointment)
-        return await _cancel_selected_appointment(key, appointment)
+        if cancel_selection_implies_confirmation(user_text):
+            return await _cancel_selected_appointment(key, appointment)
+        CTX.set_stage(key, "awaiting_cancel_confirmation")
+        return _confirm_cancel_selected_prompt(appointment)
 
     if current_stage == "awaiting_reschedule_confirmation":
         appointment = _selected_appointment(key, action="reschedule")
@@ -718,6 +730,21 @@ async def _handle_user_input_core(key: str, user_text: str) -> str:
         return copy.confirm_booking(selected, service, patient_name)
 
     route = route_message(user_text)
+    if route["type"] == "pick_slot":
+        pending_cancel = _pending_appointments(key, action="cancel")
+        if pending_cancel:
+            appointment = pick_appointment_option(user_text, pending_cancel)
+            if appointment:
+                CTX.set_selected_appointment(key, appointment)
+                CTX.set_stage(key, "awaiting_cancel_confirmation")
+                return _confirm_cancel_selected_prompt(appointment)
+        pending_reschedule = _pending_appointments(key, action="reschedule")
+        if pending_reschedule:
+            appointment = pick_appointment_option(user_text, pending_reschedule)
+            if appointment:
+                return _ask_new_day_for_selected(key, appointment)
+        return "Ya no tengo activa esa seleccion. Di cancelar cita y te vuelvo a mostrar tus citas."
+
     if route["type"] == "greeting":
         CTX.clear_flow(key)
         CTX.set_stage(key, "awaiting_service")

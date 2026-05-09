@@ -87,7 +87,8 @@ class WhatsAppCopy:
         service_text = f" para {service}" if service else ""
         return (
             f"{prefix}Te dejo apuntada la cita{service_text} el {slot}. "
-            "Te enviaremos la confirmación y el recordatorio por este WhatsApp."
+            "Te enviaremos la confirmación y el recordatorio por este WhatsApp. "
+            "Si quieres, también puedes dejarme un email."
         )
 
     @staticmethod

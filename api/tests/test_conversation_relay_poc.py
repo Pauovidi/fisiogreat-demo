@@ -368,7 +368,7 @@ def test_conversationrelay_lists_and_selects_multiple_reschedule_options():
         listed = websocket.receive_json()
         assert listed["type"] == "text"
         assert listed["last"] is True
-        assert "varias citas futuras" in listed["token"].lower()
+        assert "varias citas asociadas a este telefono" in listed["token"].lower()
 
         websocket.send_json({"type": "prompt", "voicePrompt": "la segunda", "last": True})
         selected = websocket.receive_json()
@@ -415,3 +415,26 @@ def test_conversationrelay_pending_cancel_accepts_natural_confirmation():
     assert "he cancelado" in cancelled["token"].lower()
     assert "dime si quieres cancelar" not in cancelled["token"].lower()
     assert STORE.appointments[appointment["id"]]["status"] == "cancelled"
+
+
+def test_conversationrelay_multi_cancel_numeric_selection_requires_confirmation():
+    call_sid = "CA-conversationrelay-cancel-multiple-numeric"
+    reset_state(call_sid)
+    first = create_voice_appointment(call_sid, "sesion de fisioterapia", future_start(7))
+    second = create_voice_appointment(call_sid, "valoracion inicial", future_start(8))
+
+    with client.websocket_connect("/webhook/voice/conversationrelay/ws") as websocket:
+        websocket.send_json({"type": "setup", "sessionId": "VX-cancel-many", "callSid": call_sid})
+        websocket.receive_json()
+        websocket.send_json({"type": "prompt", "voicePrompt": "quiero cancelar mi cita", "last": True})
+        listed = websocket.receive_json()
+        websocket.send_json({"type": "prompt", "voicePrompt": "2", "last": True})
+        selected = websocket.receive_json()
+        websocket.send_json({"type": "prompt", "voicePrompt": "sí, cancélala", "last": True})
+        cancelled = websocket.receive_json()
+
+    assert "varias citas asociadas a este telefono" in listed["token"].lower()
+    assert "quieres cancelar la cita" in selected["token"].lower()
+    assert "he cancelado" in cancelled["token"].lower()
+    assert STORE.appointments[first["id"]]["status"] == "confirmed"
+    assert STORE.appointments[second["id"]]["status"] == "cancelled"

@@ -39,6 +39,7 @@ from ..utils.booking_requirements import (
     is_physiotherapy_session,
 )
 from ..utils.confirmation import (
+    cancel_selection_implies_confirmation,
     is_cancel_confirmation_no,
     is_cancel_confirmation_yes,
     is_confirmation_no,
@@ -141,8 +142,8 @@ async def _start_appointment_action(call_sid: str, *, action: str, stats: Dict[s
     if not appointments:
         stats["stage_after"] = "idle"
         if action == "cancel":
-            return _respond_gather(call_sid, "No encuentro citas futuras a tu nombre.", stats)
-        return _respond_gather(call_sid, "No encuentro citas futuras a tu nombre. Si quieres, puedo ayudarte a pedir una nueva cita.", stats)
+            return _respond_gather(call_sid, "No encuentro citas futuras asociadas a este telefono.", stats)
+        return _respond_gather(call_sid, "No encuentro citas futuras asociadas a este telefono. Si quieres, puedo ayudarte a pedir una nueva cita.", stats)
 
     CTX.set_pending_appointments(call_sid, action=action, appointments=appointments)
     if len(appointments) == 1:
@@ -160,7 +161,7 @@ async def _start_appointment_action(call_sid: str, *, action: str, stats: Dict[s
     stats["stage_after"] = CTX.get_stage(call_sid)
     action_text = "cancelar" if action == "cancel" else "cambiar"
     options = "; ".join(format_appointment_option_voice(appointment, index) for index, appointment in enumerate(appointments, start=1))
-    return _respond_gather(call_sid, f"Veo que tienes varias citas futuras. Te las enumero: {options}. Cual quieres {action_text}?", stats)
+    return _respond_gather(call_sid, f"Veo varias citas asociadas a este telefono. {options}. Cual quieres {action_text}?", stats)
 
 
 def _pending_appointments(call_sid: str, *, action: str) -> List[Dict[str, Any]]:
@@ -194,6 +195,11 @@ async def _cancel_selected_appointment(call_sid: str, appointment: Dict[str, Any
     CTX.clear_flow(call_sid)
     stats["stage_after"] = "idle"
     return _respond_gather(call_sid, f"{prefix}He cancelado tu cita de {service} {when.split(' el ', 1)[-1]}.", stats)
+
+
+def _confirm_cancel_selected_prompt(appointment: Dict[str, Any]) -> str:
+    label = format_appointment_option_voice(appointment)
+    return f"Quieres cancelar la cita de {label}?"
 
 
 def _ask_new_day_for_selected(call_sid: str, appointment: Dict[str, Any], stats: Dict[str, Any]) -> Response:
@@ -755,14 +761,24 @@ async def agent_entry(
             return _respond_gather(CallSid, "Dime si quieres cancelar esa cita.", stats)
 
         if current_stage == "awaiting_cancel_selection":
+            if is_cancel_confirmation_no(user_text):
+                CTX.clear_flow(CallSid)
+                stats["branch"] = "cancel_selection_declined"
+                stats["stage_after"] = "idle"
+                return _respond_gather(CallSid, "De acuerdo, mantengo tu cita como estaba.", stats)
             appointment = pick_appointment_option(user_text, _pending_appointments(CallSid, action="cancel"))
             if not appointment:
                 stats["branch"] = "cancel_selection_retry"
                 stats["stage_after"] = "awaiting_cancel_selection"
                 return _respond_gather(CallSid, "No he identificado cual quieres cancelar. Dime primera, segunda o el servicio.", stats)
             CTX.set_selected_appointment(CallSid, appointment)
-            stats["branch"] = "cancel_selected"
-            return await _cancel_selected_appointment(CallSid, appointment, stats)
+            if cancel_selection_implies_confirmation(user_text):
+                stats["branch"] = "cancel_selected_confirmed"
+                return await _cancel_selected_appointment(CallSid, appointment, stats)
+            CTX.set_stage(CallSid, "awaiting_cancel_confirmation")
+            stats["branch"] = "cancel_selected_ask_confirmation"
+            stats["stage_after"] = "awaiting_cancel_confirmation"
+            return _respond_gather(CallSid, _confirm_cancel_selected_prompt(appointment), stats)
 
         if current_stage == "awaiting_reschedule_confirmation":
             appointment = _selected_appointment(CallSid, action="reschedule")
@@ -1127,6 +1143,26 @@ async def agent_entry(
         parse_start = time.perf_counter()
         stats["intent_ms"] += (time.perf_counter() - parse_start) * 1000
         route_type = route["type"]
+
+        if route_type == "pick_slot":
+            pending_cancel = _pending_appointments(CallSid, action="cancel")
+            if pending_cancel:
+                appointment = pick_appointment_option(user_text, pending_cancel)
+                if appointment:
+                    CTX.set_selected_appointment(CallSid, appointment)
+                    CTX.set_stage(CallSid, "awaiting_cancel_confirmation")
+                    stats["branch"] = "stale_stage_cancel_selection_recovered"
+                    stats["stage_after"] = "awaiting_cancel_confirmation"
+                    return _respond_gather(CallSid, _confirm_cancel_selected_prompt(appointment), stats)
+            pending_reschedule = _pending_appointments(CallSid, action="reschedule")
+            if pending_reschedule:
+                appointment = pick_appointment_option(user_text, pending_reschedule)
+                if appointment:
+                    stats["branch"] = "stale_stage_reschedule_selection_recovered"
+                    return _ask_new_day_for_selected(CallSid, appointment, stats)
+            stats["branch"] = "stale_selection"
+            stats["stage_after"] = CTX.get_stage(CallSid)
+            return _respond_gather(CallSid, "Ya no tengo activa esa seleccion. Di cancelar cita y te vuelvo a mostrar tus citas.", stats)
 
         if route_type == "greeting":
             CTX.clear_flow(CallSid)

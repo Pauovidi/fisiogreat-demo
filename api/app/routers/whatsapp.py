@@ -24,6 +24,7 @@ from ..utils.intent_router import detect_service, normalize_text, route_message
 from ..utils.emergency_guard import detect_emergency, emergency_reply
 from ..utils.booking_requirements import clean_consultation_reason, extract_contact, is_physiotherapy_session
 from ..utils.confirmation import (
+    cancel_selection_implies_confirmation,
     is_cancel_confirmation_no,
     is_cancel_confirmation_yes,
     is_confirmation_no,
@@ -362,18 +363,18 @@ async def _maybe_handle_optional_contact_email(key: str, body: str) -> Optional[
     ctx = CTX.get(key) or {}
     stage = CTX.get_stage(key)
     if updated_existing and stage in {"idle", "completed"}:
-        return "Perfecto, he añadido ese email a tu cita. Te enviaremos la confirmación y el recordatorio por este WhatsApp."
+        return "Perfecto, lo dejo anotado también con ese email."
     if stage == "awaiting_date":
-        return f"Perfecto, guardo ese email como contacto opcional. {copy.ask_date(ctx.get('service'))}"
+        return f"Perfecto, lo dejo anotado también con ese email. {copy.ask_date(ctx.get('service'))}"
     if stage == "offering_slots":
         current = _current_slots(key)
         if current:
-            return f"Perfecto, guardo ese email como contacto opcional.\n\n{copy.propose_slots(current)}"
+            return f"Perfecto, lo dejo anotado también con ese email.\n\n{copy.propose_slots(current)}"
     if stage == "awaiting_patient_name":
-        return f"Perfecto, guardo ese email como contacto opcional. {copy.ask_patient_name(ctx.get('service'))}"
+        return f"Perfecto, lo dejo anotado también con ese email. {copy.ask_patient_name(ctx.get('service'))}"
     if stage == "awaiting_consultation_reason":
-        return f"Perfecto, guardo ese email como contacto opcional. {copy.ask_consultation_reason_retry()}"
-    return "Perfecto, guardo ese email como contacto opcional. Te enviaremos la confirmación y el recordatorio por este WhatsApp."
+        return f"Perfecto, lo dejo anotado también con ese email. {copy.ask_consultation_reason_retry()}"
+    return "Perfecto, lo dejo anotado también con ese email."
 
 
 async def _start_appointment_action(key: str, *, action: str) -> str:
@@ -381,8 +382,8 @@ async def _start_appointment_action(key: str, *, action: str) -> str:
     CTX.clear_flow(key)
     if not appointments:
         if action == "cancel":
-            return "No encuentro citas futuras a tu nombre."
-        return "No encuentro citas futuras a tu nombre. Si quieres, puedo ayudarte a pedir una nueva cita."
+            return "No encuentro citas futuras asociadas a este WhatsApp."
+        return "No encuentro citas futuras asociadas a este WhatsApp. Si quieres, puedo ayudarte a pedir una nueva cita."
 
     CTX.set_pending_appointments(key, action=action, appointments=appointments)
     if len(appointments) == 1:
@@ -395,7 +396,7 @@ async def _start_appointment_action(key: str, *, action: str) -> str:
         return f"He encontrado tu cita de {format_appointment_option_whatsapp(appointment).lower()}. ¿Quieres cambiar esa cita?"
 
     CTX.set_stage(key, "awaiting_cancel_selection" if action == "cancel" else "awaiting_reschedule_selection")
-    lines = ["He encontrado estas citas futuras a tu nombre:"]
+    lines = ["He encontrado estas citas futuras asociadas a este WhatsApp:"]
     for index, appointment in enumerate(appointments, start=1):
         lines.append(format_appointment_option_whatsapp(appointment, index))
     question = "¿Cuál quieres cancelar?" if action == "cancel" else "¿Cuál quieres cambiar? Dime el número."
@@ -499,11 +500,16 @@ async def _cancel_selected_appointment(key: str, appointment: dict) -> str:
         return "No he podido cancelar la cita ahora mismo. Tu cita sigue igual."
     patient_name = (appointment.get("metadata") or {}).get("patient_name")
     service = (appointment.get("service_type") or "cita").lower()
-    when = format_appointment_option_whatsapp(appointment).split(" - ", 1)[-1]
+    when = format_appointment_option_whatsapp(appointment).rsplit("—", 1)[-1].strip()
     CTX.clear_flow(key)
     first = first_name(patient_name)
     prefix = f"De acuerdo, {first}. " if first else "De acuerdo. "
     return f"{prefix}He cancelado tu cita de {service} del {when}."
+
+
+def _confirm_cancel_selected_prompt(appointment: dict) -> str:
+    label = format_appointment_option_whatsapp(appointment).lower()
+    return f"¿Quieres cancelar la cita de {label}?"
 
 
 def _ask_new_day_for_selected(key: str, appointment: dict) -> str:
@@ -807,11 +813,17 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
             return _twiml("Dime si quieres cancelar esa cita, por favor.")
 
         elif current_stage == "awaiting_cancel_selection":
+            if is_cancel_confirmation_no(body):
+                CTX.clear_flow(wa_from)
+                return _twiml("De acuerdo, mantengo tu cita como estaba.")
             selected_appointment = pick_appointment_option(body, _pending_appointments(wa_from, action="cancel"))
             if not selected_appointment:
                 return _twiml("No he identificado cuál quieres cancelar. Dime el número de la cita.")
             CTX.set_selected_appointment(wa_from, selected_appointment)
-            return _twiml(await _cancel_selected_appointment(wa_from, selected_appointment))
+            if cancel_selection_implies_confirmation(body):
+                return _twiml(await _cancel_selected_appointment(wa_from, selected_appointment))
+            CTX.set_stage(wa_from, "awaiting_cancel_confirmation")
+            return _twiml(_confirm_cancel_selected_prompt(selected_appointment))
 
         elif current_stage == "awaiting_reschedule_confirmation":
             appointment = _selected_appointment(wa_from, action="reschedule")
@@ -836,6 +848,21 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
 
         route = route_message(body)
         route_type = route["type"]
+
+        if route_type == "pick_slot":
+            pending_cancel = _pending_appointments(wa_from, action="cancel")
+            if pending_cancel:
+                selected_appointment = pick_appointment_option(body, pending_cancel)
+                if selected_appointment:
+                    CTX.set_selected_appointment(wa_from, selected_appointment)
+                    CTX.set_stage(wa_from, "awaiting_cancel_confirmation")
+                    return _twiml(_confirm_cancel_selected_prompt(selected_appointment))
+            pending_reschedule = _pending_appointments(wa_from, action="reschedule")
+            if pending_reschedule:
+                selected_appointment = pick_appointment_option(body, pending_reschedule)
+                if selected_appointment:
+                    return _twiml(_ask_new_day_for_selected(wa_from, selected_appointment))
+            return _twiml("Ya no tengo activa esa selección. Dime ‘cancelar cita’ y te vuelvo a mostrar tus citas.")
 
         if route_type == "greeting":
             CTX.clear_flow(wa_from)

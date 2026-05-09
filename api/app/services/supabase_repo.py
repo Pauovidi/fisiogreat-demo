@@ -212,6 +212,11 @@ async def list_future_appointments_for_patient(
         for patient in STORE.patients.values()
         if patient.get("clinic_id") == clinic_id and patient.get("phone") == patient_key
     }
+    memory_patient_names = {
+        patient.get("id"): patient.get("name")
+        for patient in STORE.patients.values()
+        if patient.get("clinic_id") == clinic_id and patient.get("phone") == patient_key
+    }
 
     if supabase_configured():
         rows: List[Dict[str, Any]] = []
@@ -224,6 +229,7 @@ async def list_future_appointments_for_patient(
         }
         rows.extend(await _select("appointments", filters, limit=100))
         patients = await _select("patients", {"clinic_id": f"eq.{clinic_id}", "phone": f"eq.{patient_key}"}, limit=20)
+        patient_names = {patient.get("id"): patient.get("name") for patient in patients}
         for patient in patients:
             patient_id = patient.get("id")
             if not patient_id:
@@ -241,7 +247,11 @@ async def list_future_appointments_for_patient(
             )
             rows.extend(patient_rows)
         deduped = {row.get("id"): row for row in rows if row.get("id")}
-        return sorted(deduped.values(), key=lambda item: item.get("start_at") or "")
+        enriched = [
+            _with_patient_name(row, patient_names.get(row.get("patient_id")))
+            for row in deduped.values()
+        ]
+        return sorted(enriched, key=lambda item: item.get("start_at") or "")
 
     appointments = []
     for appointment in STORE.appointments.values():
@@ -256,8 +266,17 @@ async def list_future_appointments_for_patient(
             continue
         comparable_now = _coerce_now_for(start_at, now)
         if start_at >= comparable_now:
-            appointments.append(appointment)
+            appointments.append(_with_patient_name(appointment, memory_patient_names.get(appointment.get("patient_id"))))
     return sorted(appointments, key=lambda item: item.get("start_at") or "")
+
+
+def _with_patient_name(appointment: Dict[str, Any], patient_name: Optional[str]) -> Dict[str, Any]:
+    metadata = appointment.get("metadata") or {}
+    if metadata.get("patient_name") or not patient_name:
+        return appointment
+    enriched = dict(appointment)
+    enriched["patient_name"] = patient_name
+    return enriched
 
 
 def _parse_datetime(value: Any) -> Optional[dt.datetime]:

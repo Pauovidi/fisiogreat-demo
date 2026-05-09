@@ -136,6 +136,30 @@ def test_voice_confirm_slot_requires_contact_before_calendar(monkeypatch):
     assert not STORE.appointments
 
 
+def test_voice_confirm_slot_accepts_phone_only_contact(monkeypatch):
+    STORE.reset()
+    CALENDAR_STORE.reset()
+    start = dt.datetime.now() + dt.timedelta(days=7)
+    create_event_calls = []
+
+    monkeypatch.setattr("app.services.booking_service.calendar_service.create_event", lambda **kwargs: create_event_calls.append(kwargs) or "voice-phone-event")
+
+    result = asyncio.run(confirm_slot(
+        channel="voice",
+        external_user_id="CA-voice-phone-only",
+        service_type="valoracion inicial",
+        start_at=start,
+        patient_name="Pau Marco",
+        contact_phone="640505050",
+    ))
+
+    assert result.ok
+    assert create_event_calls
+    assert result.appointment["metadata"]["contact_phone"] == "640505050"
+    assert result.appointment["metadata"]["contact_channel_preference"] == "phone"
+    assert "contact_email" not in result.appointment["metadata"]
+
+
 def test_confirm_slot_metadata_and_calendar_description_include_reason_and_contact(monkeypatch):
     STORE.reset()
     CALENDAR_STORE.reset()
@@ -313,7 +337,8 @@ def test_mock_calendar_allows_confirmation(monkeypatch):
 
 def test_booking_service_proposes_slots_without_secrets():
     CALENDAR_STORE.reset()
-    slots = propose_slots(dt.datetime(2026, 5, 4, 10, 0), "sesion de fisioterapia")
+    start = (dt.datetime.now() + dt.timedelta(days=7)).replace(hour=10, minute=0, second=0, microsecond=0)
+    slots = propose_slots(start, "sesion de fisioterapia")
     assert slots
     assert slots[0]["service"] == "sesion de fisioterapia"
 
@@ -369,6 +394,7 @@ def test_list_future_appointments_filters_patient_status_past_and_calendar_event
     appointments = asyncio.run(list_future_appointments(patient_key=user))
 
     assert [appointment["calendar_event_id"] for appointment in appointments] == ["future-event"]
+    assert appointments[0]["patient_name"] == "Pau Marco"
 
 
 def test_reschedule_updates_calendar_before_supabase_and_preserves_confirmed_status(monkeypatch):

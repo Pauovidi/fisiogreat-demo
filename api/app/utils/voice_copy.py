@@ -100,8 +100,8 @@ class VoiceCopy:
     @staticmethod
     def ask_contact_with_phone_suggestion() -> str:
         return (
-            "Tengo este numero de llamada. Quieres que enviemos ahi la confirmacion "
-            "o prefieres darme otro telefono o email?"
+            "Para enviarte la confirmacion y el recordatorio, quieres que use este numero "
+            "de llamada o prefieres darme otro telefono o un email?"
         )
 
     @staticmethod

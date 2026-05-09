@@ -423,7 +423,7 @@ def test_voice_lists_multiple_future_appointments_and_uses_selection_not_last_sl
     original_second_start = second["start_at"]
 
     listed = post_voice(call_sid, SpeechResult="quiero cambiar mi cita")
-    assert "varias citas futuras" in listed.text.lower()
+    assert "varias citas asociadas a este telefono" in listed.text.lower()
     assert "primera" in listed.text.lower()
     assert "segunda" in listed.text.lower()
     assert CTX.get_stage(call_sid) == "awaiting_reschedule_selection"
@@ -446,9 +446,11 @@ def test_voice_lists_multiple_future_appointments_for_cancel_and_understands_fir
     second = create_voice_appointment(call_sid, "valoracion inicial", future_start(8))
 
     listed = post_voice(call_sid, SpeechResult="quiero cancelar mi cita")
-    assert "varias citas futuras" in listed.text.lower()
-    cancelled = post_voice(call_sid, SpeechResult="la primera")
+    assert "varias citas asociadas a este telefono" in listed.text.lower()
+    selected = post_voice(call_sid, SpeechResult="la primera")
+    cancelled = post_voice(call_sid, SpeechResult="sí")
 
+    assert "quieres cancelar la cita" in selected.text.lower()
     assert "he cancelado" in cancelled.text.lower()
     assert STORE.appointments[first["id"]]["status"] == "cancelled"
     assert STORE.appointments[second["id"]]["status"] == "confirmed"

@@ -260,7 +260,7 @@ def test_whatsapp_optional_email_before_confirmation_is_saved_without_blocking(m
     offered = post_whatsapp(user, "jueves")
     confirmed = post_whatsapp(user, "1")
 
-    assert "contacto opcional" in email.text.lower()
+    assert "lo dejo anotado también con ese email" in email.text.lower()
     assert "qué día" in email.text.lower()
     assert "te puedo ofrecer" in offered.text.lower()
     assert "te dejo apuntada" in confirmed.text.lower()
@@ -284,10 +284,26 @@ def test_whatsapp_optional_email_after_confirmation_updates_appointment():
 
     response = post_whatsapp(user, "mi email es marcos@example.com")
 
-    assert "he añadido ese email" in response.text.lower()
+    assert "lo dejo anotado también con ese email" in response.text.lower()
     metadata = STORE.appointments[appointment["id"]]["metadata"]
     assert metadata["contact_email"] == "marcos@example.com"
     assert metadata["contact_channel_preference"] == "whatsapp"
+
+
+def test_whatsapp_optional_spoken_email_after_confirmation_updates_appointment():
+    user = "+34600000038"
+    reset_state(user)
+    appointment = create_future_appointment(
+        user,
+        "valoracion inicial",
+        dt.datetime.now() + dt.timedelta(days=7),
+    )
+
+    response = post_whatsapp(user, "antonio arroba gmail punto com")
+
+    assert "lo dejo anotado también con ese email" in response.text.lower()
+    metadata = STORE.appointments[appointment["id"]]["metadata"]
+    assert metadata["contact_email"] == "antonio@gmail.com"
 
 
 def test_whatsapp_accepts_natural_second_option_text(monkeypatch):
@@ -824,17 +840,20 @@ def test_whatsapp_reschedule_one_future_appointment_requires_confirmation_then_o
 def test_whatsapp_reschedule_multiple_lists_and_selection_updates_only_selected():
     user = "+34600000052"
     reset_state(user)
-    first = create_future_appointment(user, "sesion de fisioterapia", future_start(7, 10), consultation_reason="rodilla")
-    second = create_future_appointment(user, "sesion de fisioterapia", future_start(7, 11), consultation_reason="espalda")
-    third = create_future_appointment(user, "valoracion inicial", future_start(8, 10))
+    first = create_future_appointment(user, "sesion de fisioterapia", future_start(7, 10), patient_name="Marcos Castellano", consultation_reason="rodilla")
+    second = create_future_appointment(user, "sesion de fisioterapia", future_start(7, 11), patient_name="Antonio Ruiz", consultation_reason="espalda")
+    third = create_future_appointment(user, "valoracion inicial", future_start(8, 10), patient_name="Pau Marco")
     original_first_start = first["start_at"]
     original_second_start = second["start_at"]
     original_event_id = second["calendar_event_id"]
 
     listed = post_whatsapp(user, "quiero cambiar mi cita")
-    assert "1. sesión de fisioterapia" in listed.text.lower()
-    assert "2. sesión de fisioterapia" in listed.text.lower()
-    assert "3. valoración inicial" in listed.text.lower()
+    assert "asociadas a este whatsapp" in listed.text.lower()
+    assert "1. marcos castellano" in listed.text.lower()
+    assert "2. antonio ruiz" in listed.text.lower()
+    assert "3. pau marco" in listed.text.lower()
+    assert "sesión de fisioterapia" in listed.text.lower()
+    assert "valoración inicial" in listed.text.lower()
     assert CTX.get_stage(user) == "awaiting_reschedule_selection"
 
     selected = post_whatsapp(user, "quiero cambiar la 2")
@@ -986,13 +1005,30 @@ def test_whatsapp_cancel_zero_one_multiple_and_calendar_failure():
 
     user_many = "+34600000057"
     reset_state(user_many)
-    first = create_future_appointment(user_many, "sesion de fisioterapia", future_start(7), consultation_reason="rodilla")
-    second = create_future_appointment(user_many, "valoracion inicial", future_start(8))
+    first = create_future_appointment(
+        user_many,
+        "sesion de fisioterapia",
+        future_start(7),
+        patient_name="Marcos Castellano",
+        consultation_reason="rodilla",
+    )
+    second = create_future_appointment(
+        user_many,
+        "valoracion inicial",
+        future_start(8),
+        patient_name="Antonio Ruiz",
+    )
     listed = post_whatsapp(user_many, "anular cita")
-    assert "1. sesión de fisioterapia" in listed.text.lower()
-    assert "2. valoración inicial" in listed.text.lower()
-    cancelled = post_whatsapp(user_many, "la valoración")
+    assert "asociadas a este whatsapp" in listed.text.lower()
+    assert "1. marcos castellano" in listed.text.lower()
+    assert "2. antonio ruiz" in listed.text.lower()
+    selected = post_whatsapp(user_many, "2")
+    assert "quieres cancelar la cita" in selected.text.lower()
+    assert "puedo ayudarte a pedir" not in selected.text.lower()
+    assert CTX.get(user_many)["selected_appointment_id"] == second["id"]
+    cancelled = post_whatsapp(user_many, "sí, cancélala")
     assert "he cancelado tu cita" in cancelled.text.lower()
+    assert "dime si quieres cancelar" not in cancelled.text.lower()
     assert STORE.appointments[first["id"]]["status"] == "confirmed"
     assert STORE.appointments[second["id"]]["status"] == "cancelled"
 
@@ -1046,3 +1082,76 @@ def test_whatsapp_pending_cancel_accepts_natural_confirmations_and_decline():
     assert "de acuerdo, mantengo tu cita como estaba" in kept.text.lower()
     assert STORE.appointments[appointment["id"]]["status"] == "confirmed"
     assert CALENDAR_STORE.events[appointment["calendar_event_id"]].status == "confirmed"
+
+
+def test_whatsapp_multi_cancel_accepts_la_segunda_and_decline():
+    user = "+34600000301"
+    reset_state(user)
+    first = create_future_appointment(user, "sesion de fisioterapia", future_start(7), patient_name="Marcos Castellano")
+    second = create_future_appointment(user, "valoracion inicial", future_start(8), patient_name="Antonio Ruiz")
+
+    listed = post_whatsapp(user, "quiero cancelar cita")
+    selected = post_whatsapp(user, "la segunda")
+    kept = post_whatsapp(user, "no la canceles")
+
+    assert "asociadas a este whatsapp" in listed.text.lower()
+    assert "quieres cancelar la cita" in selected.text.lower()
+    assert "de acuerdo, mantengo tu cita como estaba" in kept.text.lower()
+    assert STORE.appointments[first["id"]]["status"] == "confirmed"
+    assert STORE.appointments[second["id"]]["status"] == "confirmed"
+
+
+def test_whatsapp_multi_cancel_phrase_with_cancel_intent_cancels_selected_directly():
+    user = "+34600000302"
+    reset_state(user)
+    first = create_future_appointment(user, "sesion de fisioterapia", future_start(7), patient_name="Marcos Castellano")
+    second = create_future_appointment(user, "valoracion inicial", future_start(8), patient_name="Antonio Ruiz")
+
+    post_whatsapp(user, "quiero cancelar cita")
+    cancelled = post_whatsapp(user, "quiero cancelar la segunda")
+
+    assert "he cancelado tu cita" in cancelled.text.lower()
+    assert STORE.appointments[first["id"]]["status"] == "confirmed"
+    assert STORE.appointments[second["id"]]["status"] == "cancelled"
+
+
+def test_whatsapp_stale_numeric_selection_does_not_show_generic_menu():
+    user = "+34600000303"
+    reset_state(user)
+
+    response = post_whatsapp(user, "2")
+
+    assert "ya no tengo activa esa selección" in response.text.lower()
+    assert "puedo ayudarte a pedir" not in response.text.lower()
+
+
+def test_whatsapp_recovers_pending_cancel_selection_if_stage_was_lost():
+    user = "+34600000304"
+    reset_state(user)
+    first = create_future_appointment(user, "sesion de fisioterapia", future_start(7), patient_name="Marcos Castellano")
+    second = create_future_appointment(user, "valoracion inicial", future_start(8), patient_name="Antonio Ruiz")
+
+    post_whatsapp(user, "quiero cancelar cita")
+    CTX.set_stage(user, "idle")
+    selected = post_whatsapp(user, "2")
+    cancelled = post_whatsapp(user, "cancélala")
+
+    assert "quieres cancelar la cita" in selected.text.lower()
+    assert "he cancelado tu cita" in cancelled.text.lower()
+    assert STORE.appointments[first["id"]]["status"] == "confirmed"
+    assert STORE.appointments[second["id"]]["status"] == "cancelled"
+
+
+def test_whatsapp_reset_clears_pending_cancel_selection():
+    user = "+34600000305"
+    reset_state(user)
+    create_future_appointment(user, "valoracion inicial", future_start(7))
+    create_future_appointment(user, "consulta de seguimiento", future_start(8))
+
+    post_whatsapp(user, "quiero cancelar cita")
+    assert CTX.get(user)["pending_cancel_appointments"]
+
+    post_whatsapp(user, "reiniciar")
+
+    assert CTX.get_stage(user) == "idle"
+    assert CTX.get(user)["pending_cancel_appointments"] == []

@@ -15,6 +15,41 @@ WEEKDAYS = [
 ]
 
 VOICE_ORDINALS = ["primera", "segunda", "tercera", "cuarta", "quinta", "sexta"]
+VOICE_NUMBERS = {
+    0: "cero",
+    1: "una",
+    2: "dos",
+    3: "tres",
+    4: "cuatro",
+    5: "cinco",
+    6: "seis",
+    7: "siete",
+    8: "ocho",
+    9: "nueve",
+    10: "diez",
+    11: "once",
+    12: "doce",
+    13: "trece",
+    14: "catorce",
+    15: "quince",
+    16: "dieciseis",
+    17: "diecisiete",
+    18: "dieciocho",
+    19: "diecinueve",
+    20: "veinte",
+    21: "veintiuna",
+    22: "veintidos",
+    23: "veintitres",
+    24: "veinticuatro",
+    25: "veinticinco",
+    26: "veintiseis",
+    27: "veintisiete",
+    28: "veintiocho",
+    29: "veintinueve",
+    30: "treinta",
+    40: "cuarenta",
+    50: "cincuenta",
+}
 
 
 def parse_appointment_start(appointment: Dict[str, Any]) -> Optional[dt.datetime]:
@@ -31,11 +66,14 @@ def parse_appointment_start(appointment: Dict[str, Any]) -> Optional[dt.datetime
 
 def format_appointment_option_whatsapp(appointment: Dict[str, Any], index: Optional[int] = None) -> str:
     service = _display_service(appointment.get("service_type"))
+    patient_name = _patient_name(appointment)
     start_at = parse_appointment_start(appointment)
     if start_at:
-        label = f"{service} - {WEEKDAYS[start_at.weekday()]} {start_at.strftime('%d/%m')} a las {start_at.strftime('%H:%M')}"
+        label = f"{service} — {WEEKDAYS[start_at.weekday()]} {start_at.strftime('%d/%m')} a las {start_at.strftime('%H:%M')}"
     else:
         label = service
+    if patient_name:
+        label = f"{patient_name} — {label}"
     if index is not None:
         return f"{index}. {label}"
     return label
@@ -43,11 +81,14 @@ def format_appointment_option_whatsapp(appointment: Dict[str, Any], index: Optio
 
 def format_appointment_option_voice(appointment: Dict[str, Any], index: Optional[int] = None) -> str:
     service = _display_service(appointment.get("service_type"))
+    patient_name = _patient_name(appointment)
     start_at = parse_appointment_start(appointment)
     if start_at:
-        label = f"{service} el {WEEKDAYS[start_at.weekday()]} a las {start_at.strftime('%H:%M')}"
+        label = f"{service} el {WEEKDAYS[start_at.weekday()]} {_voice_time(start_at)}"
     else:
         label = service
+    if patient_name:
+        label = f"{patient_name}, {label}"
     if index is not None:
         ordinal = VOICE_ORDINALS[index - 1] if 0 < index <= len(VOICE_ORDINALS) else str(index)
         return f"{ordinal}, {label}"
@@ -112,6 +153,38 @@ def _display_service(service: Optional[str]) -> str:
     if "fisio" in normalized or "fisioterapia" in normalized:
         return "Sesión de fisioterapia"
     return (service or "Cita").strip().capitalize()
+
+
+def _voice_time(value: dt.datetime) -> str:
+    hour = value.hour % 12 or 12
+    minute = value.minute
+    prefix = "la" if hour == 1 else "las"
+    hour_text = VOICE_NUMBERS.get(hour, str(hour))
+    if minute == 0:
+        return f"a {prefix} {hour_text}"
+    if minute == 15:
+        return f"a {prefix} {hour_text} y cuarto"
+    if minute == 30:
+        return f"a {prefix} {hour_text} y media"
+    return f"a {prefix} {hour_text} y {_voice_number(minute)}"
+
+
+def _voice_number(value: int) -> str:
+    if value in VOICE_NUMBERS:
+        return VOICE_NUMBERS[value]
+    tens = value - (value % 10)
+    ones = value % 10
+    if tens in VOICE_NUMBERS and ones in VOICE_NUMBERS:
+        return f"{VOICE_NUMBERS[tens]} y {VOICE_NUMBERS[ones]}"
+    return str(value)
+
+
+def _patient_name(appointment: Dict[str, Any]) -> Optional[str]:
+    metadata = appointment.get("metadata") or {}
+    value = metadata.get("patient_name") or appointment.get("patient_name")
+    if not value:
+        return None
+    return " ".join(str(value).split())
 
 
 def _pick_index(normalized: str, count: int) -> Optional[int]:
