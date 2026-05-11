@@ -54,8 +54,19 @@ def propose_slots(
     ignore_calendar_event_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     duration = service_duration_minutes(service_type)
-    candidates = local_propose_slots(preferred, _normalize_service(service_type), BusinessRules())
+    rules = BusinessRules()
+    candidate_limit = max(count * 12, 48)
+    search_window_start = preferred - dt.timedelta(hours=2)
+    search_window_end = preferred + dt.timedelta(days=1)
+    candidates = local_propose_slots(
+        preferred,
+        _normalize_service(service_type),
+        rules,
+        max_candidates=candidate_limit,
+    )
     slots: List[Dict[str, Any]] = []
+    skipped_busy_count = 0
+    busy_intervals_count = 0
     for candidate in candidates:
         start_at = candidate["start"]
         end_at = start_at + dt.timedelta(minutes=duration)
@@ -64,11 +75,26 @@ def propose_slots(
             if ignore_calendar_event_id
             else calendar_service.free_busy(start_at, end_at)
         )
+        busy_intervals_count += len(busy)
         if busy:
+            skipped_busy_count += 1
             continue
         slots.append({"start": start_at, "end": end_at, "service": service_type})
         if len(slots) >= count:
             break
+    logger.info(
+        "slot_search slots_requested_count=%s slots_found_count=%s slot_search_date=%s "
+        "slot_search_window_start=%s slot_search_window_end=%s busy_intervals_count=%s "
+        "skipped_busy_count=%s skipped_original_slot_count=%s",
+        count,
+        len(slots),
+        preferred.date().isoformat(),
+        search_window_start.isoformat(),
+        search_window_end.isoformat(),
+        busy_intervals_count,
+        skipped_busy_count,
+        0,
+    )
     return slots
 
 

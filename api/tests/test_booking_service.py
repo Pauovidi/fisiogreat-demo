@@ -343,6 +343,25 @@ def test_booking_service_proposes_slots_without_secrets():
     assert slots[0]["service"] == "sesion de fisioterapia"
 
 
+def test_booking_service_keeps_searching_after_busy_candidates(monkeypatch):
+    CALENDAR_STORE.reset()
+    start = (dt.datetime.now() + dt.timedelta(days=7)).replace(hour=10, minute=0, second=0, microsecond=0)
+    calls = []
+
+    def fake_free_busy(*_args, **_kwargs):
+        calls.append(_args)
+        if len(calls) <= 6:
+            return [{"start": "busy", "end": "busy"}]
+        return []
+
+    monkeypatch.setattr("app.services.booking_service.calendar_service.free_busy", fake_free_busy)
+
+    slots = propose_slots(start, "sesion de fisioterapia", count=3)
+
+    assert len(slots) == 3
+    assert len(calls) > 6
+
+
 def test_list_future_appointments_filters_patient_status_past_and_calendar_event():
     STORE.reset()
     CALENDAR_STORE.reset()

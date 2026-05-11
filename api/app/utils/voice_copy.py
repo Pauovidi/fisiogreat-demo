@@ -136,23 +136,30 @@ class VoiceCopy:
 
     @staticmethod
     def ask_date_retry() -> str:
-        return "Dime un dia, por ejemplo jueves o sabado."
+        return "No he entendido bien el dia. Puedes decirme, por ejemplo, manana, jueves o el viernes por la manana."
 
     @staticmethod
     def ask_time_pref() -> str:
         return "Te va mejor por la manana o por la tarde?"
 
     @staticmethod
-    def propose_slots(slots: List[str]) -> str:
+    def propose_slots(slots: List[str], *, time_pref: Optional[str] = None) -> str:
         if not slots:
             return "No tengo hueco ahi. Dime otro dia."
 
         spoken = [VoiceCopy._slot_to_voice_text(slot, include_day=False, include_prefix=False) for slot in slots[:3]]
+        day_context = VoiceCopy._slot_day_context(slots[0], time_pref)
         if len(spoken) == 1:
-            return f"Tengo {spoken[0]}. Di primera."
+            if day_context:
+                return f"Para {day_context} solo veo este hueco: {spoken[0]}. Di primera si te encaja."
+            return f"Solo veo este hueco: {spoken[0]}. Di primera si te encaja."
         if len(spoken) == 2:
+            if day_context:
+                return f"Para {day_context} tengo estas opciones: {spoken[0]} o {spoken[1]}. Di primera o segunda."
             return f"Tengo {spoken[0]} o {spoken[1]}. Di primera o segunda."
-        return f"Tengo {spoken[0]}, {spoken[1]} o {spoken[2]}. Di primera, segunda o tercera."
+        if day_context:
+            return f"Para {day_context} tengo estas opciones: {spoken[0]}, {spoken[1]} y {spoken[2]}. Di primera, segunda o tercera."
+        return f"Tengo {spoken[0]}, {spoken[1]} y {spoken[2]}. Di primera, segunda o tercera."
 
     @staticmethod
     def confirm_booking(slot: str, service: Optional[str] = None, patient_name: Optional[str] = None) -> str:
@@ -235,6 +242,18 @@ class VoiceCopy:
             return None
         stripped = patient_name.strip()
         return stripped.split()[0] if stripped else None
+
+    @staticmethod
+    def _slot_day_context(slot: str, time_pref: Optional[str] = None) -> Optional[str]:
+        weekday_match = re.search(r"([a-zA-ZáéíóúÁÉÍÓÚñÑ]+)\s+\d{2}/\d{2}", slot)
+        if not weekday_match:
+            return None
+        pref = ""
+        if time_pref == "morning":
+            pref = " por la manana"
+        elif time_pref == "afternoon":
+            pref = " por la tarde"
+        return f"el {weekday_match.group(1)}{pref}"
 
     @staticmethod
     def _slot_to_voice_text(slot: str, *, include_day: bool, include_prefix: bool) -> str:

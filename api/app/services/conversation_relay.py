@@ -44,7 +44,7 @@ from .booking_service import (
 from . import supabase_repo
 
 
-CR_SLOT_PAGE_SIZE = 2
+CR_SLOT_PAGE_SIZE = 3
 ACTIVE_STAGE_NATURAL_ROUTE_TYPES = {"faq", "human_handoff", "uncertain", "acknowledgement"}
 WEEKDAY_LABELS = [
     "lunes",
@@ -123,8 +123,22 @@ def _log_conversationrelay_turn(
         ),
         "branch": _turn_branch(stage_before, stage_after, intent_detected),
         "bot_reply": mask_sensitive_text(bot_reply),
+        "voice_date_raw": masked_user_text,
+        "voice_date_normalized": masked_normalized_text,
+        "parsed_target_date": _date_iso(parse_spanish_day(user_text)),
+        "parsed_weekday": _weekday_name(parse_spanish_day(user_text)),
+        "date_source": "current_turn" if parse_spanish_day(user_text) else ("stored_state" if ctx.get("date_pref") else "fallback"),
+        "time_preference": parse_time_pref(user_text) or ctx.get("time_pref") or ctx_before.get("time_pref"),
     }
     logger.info("conversationrelay_turn " + " ".join(f"{key}={payload[key]!r}" for key in payload))
+
+
+def _date_iso(value: Optional[dt.date]) -> Optional[str]:
+    return value.isoformat() if value else None
+
+
+def _weekday_name(value: Optional[dt.date]) -> Optional[str]:
+    return WEEKDAY_LABELS[value.weekday()] if value else None
 
 
 @dataclass
@@ -326,7 +340,8 @@ async def _confirm_reschedule_slot(key: str, user_text: str) -> str:
     current = _current_slots(key)
     selected = pick_slot(user_text, current)
     if not selected:
-        return copy.propose_slots(current)
+        ctx = CTX.get(key) or {}
+        return copy.propose_slots(current, time_pref=ctx.get("time_pref"))
     appointment = _selected_appointment(key, action="reschedule")
     selected_dt = parse_slot_label(selected)
     if not appointment or not selected_dt:
@@ -497,7 +512,7 @@ async def _handle_user_input_core(key: str, user_text: str) -> str:
         appointment = _selected_appointment(key, action="reschedule")
         if parsed_date and appointment:
             return _offer_slots(key, appointment.get("service_type") or "sesion de fisioterapia", parsed_date, parse_time_pref(user_text), stage="offering_reschedule_slots")
-        return "Dime el nuevo dia, por ejemplo manana o jueves."
+        return copy.ask_date_retry()
 
     if current_stage == "offering_reschedule_slots":
         return await _confirm_reschedule_slot(key, user_text)
@@ -612,18 +627,12 @@ async def _handle_user_input_core(key: str, user_text: str) -> str:
         if time_pref:
             ctx = CTX.get(key) or {}
             CTX.set_time_pref(key, time_pref)
-            return copy.ask_date_with_time_pref(ctx.get("service"), time_pref)
-
-        natural = await _maybe_handle_active_stage_natural_turn(key, user_text, route_peek["type"])
-        if natural.handled:
-            return natural.reply or copy.ask_date()
+            return copy.ask_date_retry()
 
         if route_peek["type"] == "out_of_scope":
             return out_of_scope_answer("voice")
         if route_peek["type"] == "reschedule":
             return await _start_appointment_action(key, action="reschedule")
-        if time_pref:
-            return copy.ask_date_retry()
         return copy.ask_date_retry()
 
     if current_stage == "offering_slots":
@@ -657,7 +666,7 @@ async def _handle_user_input_core(key: str, user_text: str) -> str:
                 return _offer_slots(key, service, date_pref, "afternoon")
             next_batch = CTX.next_slots(key, CR_SLOT_PAGE_SIZE)
             if next_batch:
-                return copy.propose_slots(next_batch)
+                return copy.propose_slots(next_batch, time_pref=ctx.get("time_pref"))
             if service and date_pref:
                 return _offer_slots(key, service, date_pref, "afternoon")
 
@@ -673,18 +682,18 @@ async def _handle_user_input_core(key: str, user_text: str) -> str:
 
         natural = await _maybe_handle_active_stage_natural_turn(key, user_text, route_peek["type"])
         if natural.handled:
-            return natural.reply or copy.propose_slots(current)
+            return natural.reply or copy.propose_slots(current, time_pref=ctx.get("time_pref"))
 
         if route_peek["type"] == "more_options":
             next_batch = CTX.next_slots(key, CR_SLOT_PAGE_SIZE)
             if next_batch:
-                return copy.propose_slots(next_batch)
+                return copy.propose_slots(next_batch, time_pref=ctx.get("time_pref"))
             return "No tengo mas huecos para ese dia. Dime otro."
         if route_peek["type"] == "reschedule":
             return await _start_appointment_action(key, action="reschedule")
         if route_peek["type"] == "out_of_scope":
             return out_of_scope_answer("voice")
-        return copy.propose_slots(current)
+        return copy.propose_slots(current, time_pref=ctx.get("time_pref"))
 
     if current_stage == "awaiting_contact":
         ctx = CTX.get(key) or {}
@@ -793,9 +802,20 @@ def _offer_slots(
 ) -> str:
     CTX.set_date(key, parsed_date)
     CTX.set_time_pref(key, time_pref)
-    CTX.set_slots(key, _build_short_slot_labels(service, parsed_date, time_pref))
+    appointment = _selected_appointment(key, action="reschedule") if stage == "offering_reschedule_slots" else None
+    CTX.set_slots(
+        key,
+        _build_short_slot_labels(
+            service,
+            parsed_date,
+            time_pref,
+            ignore_calendar_event_id=(appointment or {}).get("calendar_event_id"),
+            original_start_at=(appointment or {}).get("start_at"),
+            allow_dummy_fallback=stage != "offering_reschedule_slots",
+        ),
+    )
     CTX.set_stage(key, stage)
-    return copy.propose_slots(CTX.next_slots(key, CR_SLOT_PAGE_SIZE))
+    return copy.propose_slots(CTX.next_slots(key, CR_SLOT_PAGE_SIZE), time_pref=time_pref)
 
 
 def _reprompt_for_stage(key: str) -> str:
@@ -812,7 +832,7 @@ def _reprompt_for_stage(key: str) -> str:
     if stage == "awaiting_reschedule_selection":
         return "Dime cual quieres cambiar, por ejemplo la primera o la segunda."
     if stage == "awaiting_reschedule_date":
-        return "Dime el nuevo dia que te vendria mejor."
+        return copy.ask_date_retry()
     if stage == "awaiting_patient_name":
         return copy.ask_patient_name(ctx.get("service"))
     if stage == "awaiting_consultation_reason":
@@ -824,12 +844,12 @@ def _reprompt_for_stage(key: str) -> str:
     if stage == "offering_slots":
         current = _current_slots(key)
         if current:
-            return copy.propose_slots(current)
+            return copy.propose_slots(current, time_pref=ctx.get("time_pref"))
         return copy.ask_date(ctx.get("service"))
     if stage == "offering_reschedule_slots":
         current = _current_slots(key)
         if current:
-            return copy.propose_slots(current)
+            return copy.propose_slots(current, time_pref=ctx.get("time_pref"))
         return "Dime otro dia y miro huecos."
     return copy.ask_service_retry()
 
@@ -849,12 +869,24 @@ def _build_short_slot_labels(
     service: str,
     date_pref: dt.date,
     time_pref: Optional[str],
-    count: int = 4,
+    count: int = CR_SLOT_PAGE_SIZE,
+    *,
+    ignore_calendar_event_id: Optional[str] = None,
+    original_start_at: Optional[Any] = None,
+    allow_dummy_fallback: bool = True,
 ) -> List[str]:
     preferred_hour = 11 if time_pref == "morning" else 16 if time_pref == "afternoon" else 12
     preferred_dt = dt.datetime.combine(date_pref, dt.time(preferred_hour, 0))
+    search_count = max(count * 8, 12)
+    original_start = _parse_start(original_start_at)
+    skipped_original_slot_count = 0
     try:
-        raw_slots = booking_propose_slots(preferred_dt, service, count=count)
+        raw_slots = booking_propose_slots(
+            preferred_dt,
+            service,
+            count=search_count,
+            ignore_calendar_event_id=ignore_calendar_event_id,
+        )
     except Exception as exc:
         logger.warning(f"conversationrelay_slot_generation_fallback service={service!r} error={exc!r}")
         if settings.USE_REAL_CALENDAR:
@@ -864,11 +896,14 @@ def _build_short_slot_labels(
     labels: List[str] = []
     for slot in raw_slots:
         start = slot["start"]
-        if start.date() < date_pref:
+        if start.date() != date_pref:
             continue
         if time_pref == "morning" and start.hour >= 15:
             continue
         if time_pref == "afternoon" and start.hour < 15:
+            continue
+        if original_start and start.replace(tzinfo=None) == original_start:
+            skipped_original_slot_count += 1
             continue
         label = _format_slot_label(start)
         if label not in labels:
@@ -877,20 +912,81 @@ def _build_short_slot_labels(
             break
 
     if labels:
+        _log_slot_search(
+            prefix="conversationrelay",
+            requested_count=count,
+            found_count=len(labels),
+            date_pref=date_pref,
+            preferred_dt=preferred_dt,
+            skipped_original_slot_count=skipped_original_slot_count,
+        )
         return labels
-    if settings.USE_REAL_CALENDAR:
+    if settings.USE_REAL_CALENDAR or not allow_dummy_fallback:
+        _log_slot_search(
+            prefix="conversationrelay",
+            requested_count=count,
+            found_count=0,
+            date_pref=date_pref,
+            preferred_dt=preferred_dt,
+            skipped_original_slot_count=skipped_original_slot_count,
+        )
         return []
     selected = [dt.datetime.combine(date_pref, slot_time) for slot_time in _fallback_slot_times(time_pref, count)]
-    return [_format_slot_label(slot_dt) for slot_dt in selected]
+    labels = [_format_slot_label(slot_dt) for slot_dt in selected]
+    _log_slot_search(
+        prefix="conversationrelay",
+        requested_count=count,
+        found_count=len(labels),
+        date_pref=date_pref,
+        preferred_dt=preferred_dt,
+        skipped_original_slot_count=skipped_original_slot_count,
+    )
+    return labels
+
+
+def _parse_start(value: Any) -> Optional[dt.datetime]:
+    if isinstance(value, dt.datetime):
+        return value.replace(tzinfo=None)
+    if not value:
+        return None
+    try:
+        return dt.datetime.fromisoformat(str(value).replace("Z", "+00:00")).replace(tzinfo=None)
+    except ValueError:
+        return None
+
+
+def _log_slot_search(
+    *,
+    prefix: str,
+    requested_count: int,
+    found_count: int,
+    date_pref: dt.date,
+    preferred_dt: dt.datetime,
+    skipped_original_slot_count: int,
+) -> None:
+    logger.info(
+        "%s_slot_search slots_requested_count=%s slots_found_count=%s slot_search_date=%s "
+        "slot_search_window_start=%s slot_search_window_end=%s busy_intervals_count=%s "
+        "skipped_busy_count=%s skipped_original_slot_count=%s",
+        prefix,
+        requested_count,
+        found_count,
+        date_pref.isoformat(),
+        preferred_dt.isoformat(),
+        (preferred_dt + dt.timedelta(days=1)).isoformat(),
+        0,
+        0,
+        skipped_original_slot_count,
+    )
 
 
 def _fallback_slot_times(time_pref: Optional[str], count: int) -> List[dt.time]:
     if time_pref == "morning":
-        times = [dt.time(10, 0), dt.time(11, 30)]
+        times = [dt.time(10, 0), dt.time(10, 15), dt.time(10, 30)]
     elif time_pref == "afternoon":
-        times = [dt.time(16, 0), dt.time(17, 0)]
+        times = [dt.time(16, 0), dt.time(16, 15), dt.time(16, 30)]
     else:
-        times = [dt.time(10, 0), dt.time(17, 0)]
+        times = [dt.time(10, 0), dt.time(10, 15), dt.time(10, 30)]
     return times[:count]
 
 

@@ -32,14 +32,14 @@ def _is_open(when: dt.datetime, rules: BusinessRules) -> bool:
     start_t = _parse_hhmm(conf[0]); end_t = _parse_hhmm(conf[1])
     return start_t <= when.time() <= end_t
 
-def propose_slots(preferred: dt.datetime, service_key: str, rules: BusinessRules):
+def propose_slots(preferred: dt.datetime, service_key: str, rules: BusinessRules, *, max_candidates: int = 48):
     now = dt.datetime.now()
     if (preferred - now).total_seconds() < rules.min_lead_minutes*60:
         preferred = now + dt.timedelta(minutes=rules.min_lead_minutes)
     duration = ServiceCatalog.durations.get(service_key, 30)
     slots, start, end, step = [], preferred - dt.timedelta(hours=2), preferred + dt.timedelta(days=1), dt.timedelta(minutes=15)
     cursor = start
-    while cursor <= end and len(slots) < 6:
+    while cursor <= end and len(slots) < max_candidates:
         if _is_open(cursor, rules):
             slot_end = cursor + dt.timedelta(minutes=duration + rules.buffer_min)
             if _is_open(slot_end, rules):

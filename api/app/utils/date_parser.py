@@ -25,13 +25,13 @@ def _normalize(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def parse_spanish_day(text: str, tz: str = "Europe/Madrid") -> Optional[dt.date]:
+def parse_spanish_day(text: str, tz: str = "Europe/Madrid", *, today: Optional[dt.date] = None) -> Optional[dt.date]:
     normalized = _normalize(text)
-    today = dt.datetime.now(ZoneInfo(tz)).date()
+    today = today or _today(tz)
 
-    if re.search(r"\bpasado man(?:a|i)na\b", normalized):
+    if _has_day_after_tomorrow(normalized):
         return today + dt.timedelta(days=2)
-    if re.search(r"\bman(?:a|i)na\b", normalized):
+    if _has_tomorrow(normalized):
         return today + dt.timedelta(days=1)
     if re.search(r"\bhoy\b", normalized):
         return today
@@ -44,6 +44,31 @@ def parse_spanish_day(text: str, tz: str = "Europe/Madrid") -> Optional[dt.date]
             return today + dt.timedelta(days=days_ahead)
 
     return None
+
+
+def _today(tz: str) -> dt.date:
+    return dt.datetime.now(ZoneInfo(tz)).date()
+
+
+def _has_day_after_tomorrow(normalized: str) -> bool:
+    return re.search(r"\bpasado\s+manana\b", normalized) is not None
+
+
+def _has_tomorrow(normalized: str) -> bool:
+    tokens = normalized.split()
+    for index, token in enumerate(tokens):
+        if token != "manana":
+            continue
+        previous = tokens[index - 1] if index > 0 else ""
+        previous_previous = tokens[index - 2] if index > 1 else ""
+        if previous == "pasado":
+            continue
+        if previous == "la":
+            continue
+        if previous in {"por", "de"}:
+            continue
+        return True
+    return False
 
 
 def parse_time_pref(text: str) -> Optional[Literal["morning", "afternoon"]]:

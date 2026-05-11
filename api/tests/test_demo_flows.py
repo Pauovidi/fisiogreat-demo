@@ -147,6 +147,41 @@ def test_voice_physiotherapy_requires_reason_and_contact_before_confirmation():
     assert not STORE.appointments
 
 
+def test_voice_jueves_que_viene_morning_uses_current_turn_date(monkeypatch):
+    call_sid = "CA-voice-date-jueves-morning"
+    reset_state(call_sid)
+    monkeypatch.setattr("app.utils.date_parser._today", lambda _tz: dt.date(2026, 5, 11))
+
+    post_voice(call_sid)
+    post_voice(call_sid, SpeechResult="valoracion inicial")
+    post_voice(call_sid, SpeechResult="Pau Marco")
+    CTX.set_date(call_sid, dt.date(2026, 5, 12))
+    response = post_voice(call_sid, SpeechResult="el jueves que viene por la mañana")
+
+    ctx = CTX.get(call_sid)
+    assert "para el jueves por la manana" in response.text.lower()
+    assert "primera, segunda o tercera" in response.text.lower()
+    assert ctx["date_pref"] == dt.date(2026, 5, 14)
+    assert ctx["time_pref"] == "morning"
+    assert all(slot.startswith("jueves 14/05") for slot in ctx["offered_slots"])
+
+
+def test_voice_unparsed_date_does_not_offer_slots_from_stored_state(monkeypatch):
+    call_sid = "CA-voice-date-unparsed"
+    reset_state(call_sid)
+    monkeypatch.setattr("app.utils.date_parser._today", lambda _tz: dt.date(2026, 5, 11))
+
+    post_voice(call_sid)
+    post_voice(call_sid, SpeechResult="valoracion inicial")
+    post_voice(call_sid, SpeechResult="Pau Marco")
+    CTX.set_date(call_sid, dt.date(2026, 5, 12))
+    response = post_voice(call_sid, SpeechResult="cuando puedas")
+
+    assert "no he entendido bien el dia" in response.text.lower()
+    assert CTX.get_stage(call_sid) == "awaiting_date"
+    assert CTX.get(call_sid)["offered_slots"] == []
+
+
 @pytest.mark.parametrize(
     ("spoken_name", "expected_name"),
     [

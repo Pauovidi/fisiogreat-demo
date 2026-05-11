@@ -175,8 +175,33 @@ def test_conversationrelay_active_stage_uses_stage_retry_not_generic_natural_fal
 
     assert retry["type"] == "text"
     assert retry["last"] is True
-    assert "dime un dia" in retry["token"].lower()
+    assert "no he entendido bien el dia" in retry["token"].lower()
     assert CTX.get_stage(call_sid) == "awaiting_date"
+
+
+def test_conversationrelay_jueves_que_viene_morning_uses_current_turn_date(monkeypatch):
+    call_sid = "CA-conversationrelay-date-jueves-morning"
+    reset_state(call_sid)
+    monkeypatch.setattr("app.utils.date_parser._today", lambda _tz: dt.date(2026, 5, 11))
+
+    with client.websocket_connect("/webhook/voice/conversationrelay/ws") as websocket:
+        websocket.send_json({"type": "setup", "sessionId": "VX-date-jueves", "callSid": call_sid})
+        websocket.receive_json()
+        websocket.send_json({"type": "prompt", "voicePrompt": "valoracion inicial", "last": True})
+        websocket.receive_json()
+        websocket.send_json({"type": "prompt", "voicePrompt": "Pau Marco", "last": True})
+        websocket.receive_json()
+        CTX.set_date(call_sid, dt.date(2026, 5, 12))
+        websocket.send_json({"type": "prompt", "voicePrompt": "el jueves que viene por la mañana", "last": True})
+        offered = websocket.receive_json()
+
+    ctx = CTX.get(call_sid)
+    assert "para el jueves por la manana" in offered["token"].lower()
+    assert "martes" not in offered["token"].lower()
+    assert "primera, segunda o tercera" in offered["token"].lower()
+    assert ctx["date_pref"] == dt.date(2026, 5, 14)
+    assert ctx["time_pref"] == "morning"
+    assert all(slot.startswith("jueves 14/05") for slot in ctx["offered_slots"])
 
 
 @pytest.mark.parametrize(
