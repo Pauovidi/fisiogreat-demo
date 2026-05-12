@@ -42,35 +42,35 @@ NUMBER_WORDS = {
 class VoiceCopy:
     @staticmethod
     def opening_greeting() -> str:
-        return "Hola, soy el asistente de FisioGreat. En que puedo ayudarte?"
+        return "Hola, soy el asistente de FisioGreat. ¿En qué puedo ayudarte?"
 
     @staticmethod
     def ask_service() -> str:
-        return "Que cita necesitas?"
+        return "¿Qué cita necesitas?"
 
     @staticmethod
     def ask_service_for_booking() -> str:
-        return "Vale, claro. Que tipo de cita necesitas?"
+        return "Vale, claro. ¿Qué tipo de cita necesitas?"
 
     @staticmethod
     def ask_service_retry() -> str:
-        return "No te segui. Quieres primera visita, sesion de fisioterapia o seguimiento?"
+        return "No te seguí. ¿Quieres primera visita, sesión de fisioterapia o seguimiento?"
 
     @staticmethod
     def clarify_lavado() -> str:
-        return "Quieres una sesion de fisioterapia?"
+        return "¿Quieres una sesión de fisioterapia?"
 
     @staticmethod
     def ask_date(service: Optional[str] = None) -> str:
         if service:
-            return f"Perfecto, para {service}. Que dia te va bien?"
-        return "Perfecto. Que dia te va bien?"
+            return f"Perfecto, para {VoiceCopy._display_service(service)}. ¿Qué día te va bien?"
+        return "Perfecto. ¿Qué día te va bien?"
 
     @staticmethod
     def ask_patient_name(service: Optional[str] = None) -> str:
         if service:
-            return f"Perfecto, para {service}. A que nombre dejamos la cita?"
-        return "Perfecto. A que nombre dejamos la cita?"
+            return f"Perfecto, para {VoiceCopy._display_service(service)}. ¿A qué nombre dejamos la cita?"
+        return "Perfecto. ¿A qué nombre dejamos la cita?"
 
     @staticmethod
     def ask_patient_name_retry(attempt: int = 1) -> str:
@@ -80,7 +80,7 @@ class VoiceCopy:
 
     @staticmethod
     def ask_consultation_reason() -> str:
-        return "Para que el fisioterapeuta pueda preparar mejor la sesion, cual es el motivo de la consulta?"
+        return "Para que el fisioterapeuta pueda preparar mejor la sesión, ¿cuál es el motivo de la consulta?"
 
     @staticmethod
     def ask_consultation_reason_retry() -> str:
@@ -88,57 +88,57 @@ class VoiceCopy:
 
     @staticmethod
     def consultation_reason_then_patient_name() -> str:
-        return "De acuerdo, con esta informacion podemos preparar mejor tu sesion. A que nombre dejamos la cita?"
+        return "De acuerdo, con esta información podemos preparar mejor tu sesión. ¿A qué nombre dejamos la cita?"
 
     @staticmethod
     def consultation_reason_then_date() -> str:
-        return "De acuerdo, con esta informacion podemos preparar mejor tu sesion. Que dia te va bien?"
+        return "De acuerdo, con esta información podemos preparar mejor tu sesión. ¿Qué día te va bien?"
 
     @staticmethod
     def ask_contact() -> str:
-        return "Para enviarte la confirmación y el recordatorio, ¿me das un teléfono móvil o un email?"
+        return "Para enviarte la confirmación y el recordatorio, ¿me das un teléfono móvil o tu correo electrónico?"
 
     @staticmethod
     def ask_contact_with_phone_suggestion() -> str:
-        return "Para enviarte la confirmación y el recordatorio, ¿quieres que use este número de llamada o prefieres darme otro teléfono o un email?"
+        return "Para enviarte la confirmación y el recordatorio, ¿uso este número de llamada o me das otro teléfono o tu correo electrónico?"
 
     @staticmethod
     def ask_contact_email() -> str:
-        return "Perfecto, dime el email. Puedes decirlo como marcos arroba ejemplo punto com."
+        return "Perfecto, dime tu correo electrónico. Puedes decirlo como marcos arroba ejemplo punto com."
 
     @staticmethod
     def ask_contact_retry(attempt: int = 1) -> str:
         if attempt <= 1:
             return (
-                "Perdona, no lo he entendido bien. Puedes decir un email como "
-                "marcos arroba ejemplo punto com, o un telefono movil."
+                "Perdona, no lo he entendido bien. Puedes decir tu correo electrónico como "
+                "marcos arroba ejemplo punto com, o un teléfono móvil."
             )
-        return "Sigo sin entenderlo. Si quieres, dime solo un telefono movil, por ejemplo 640 50 50 50."
+        return "Sigo sin entenderlo. Si quieres, dime solo un teléfono móvil, por ejemplo 640 50 50 50."
 
     @staticmethod
     def contact_required_before_closing() -> str:
-        return "Antes de cerrar la cita necesito un telefono o email para enviarte la confirmacion."
+        return "Antes de cerrar la cita necesito un teléfono o correo electrónico para enviarte la confirmación."
 
     @staticmethod
     def thanks_name_then_date(first_name: str) -> str:
-        return f"Gracias, {first_name}. Que dia te va bien?"
+        return f"Gracias, {first_name}. ¿Qué día te va bien?"
 
     @staticmethod
     def resume_date(service: Optional[str] = None) -> str:
         if service:
-            return f"Para {service}, que dia te va bien?"
-        return "Que dia te va bien?"
+            return f"Para {VoiceCopy._display_service(service)}, ¿qué día te va bien?"
+        return "¿Qué día te va bien?"
 
     @staticmethod
     def ask_date_with_time_pref(service: Optional[str] = None, time_pref: Optional[str] = None) -> str:
-        pref_text = "por la tarde" if time_pref == "afternoon" else "por la manana"
+        pref_text = "por la tarde" if time_pref == "afternoon" else "por la mañana"
         if service:
-            return f"Perfecto, mejor {pref_text}. Para {service}, que dia te va bien?"
-        return f"Perfecto, mejor {pref_text}. Que dia te va bien?"
+            return f"Perfecto, mejor {pref_text}. Para {VoiceCopy._display_service(service)}, ¿qué día te va bien?"
+        return f"Perfecto, mejor {pref_text}. ¿Qué día te va bien?"
 
     @staticmethod
     def ask_date_retry() -> str:
-        return "No he entendido bien el dia. Puedes decirme, por ejemplo, manana, jueves o el viernes por la manana."
+        return "No he entendido bien el día. Puedes decirme, por ejemplo, mañana, jueves o el viernes por la mañana."
 
     @staticmethod
     def clarify_weekday(weekday: Optional[str]) -> str:
@@ -148,12 +148,12 @@ class VoiceCopy:
 
     @staticmethod
     def ask_time_pref() -> str:
-        return "Te va mejor por la manana o por la tarde?"
+        return "¿Te va mejor por la mañana o por la tarde?"
 
     @staticmethod
     def propose_slots(slots: List[str], *, time_pref: Optional[str] = None) -> str:
         if not slots:
-            return "No tengo hueco ahi. Dime otro dia."
+            return "No tengo hueco ahí. Dime otro día."
 
         spoken = [VoiceCopy._slot_to_voice_text(slot, include_day=False, include_prefix=False) for slot in slots[:3]]
         day_context = VoiceCopy._slot_day_context(slots[0], time_pref)
@@ -182,14 +182,14 @@ class VoiceCopy:
         ][date_pref.weekday()]
         pref = ""
         if time_pref == "morning":
-            pref = " por la manana"
+            pref = " por la mañana"
         elif time_pref == "afternoon":
             pref = " por la tarde"
         return f"Para el {weekday}{pref} no veo huecos libres. ¿Quieres que miremos otro día?"
 
     @staticmethod
     def confirm_booking(slot: str, service: Optional[str] = None, patient_name: Optional[str] = None) -> str:
-        service_part = f" para {service}" if service else ""
+        service_part = f" para {VoiceCopy._display_service(service)}" if service else ""
         return f"Gracias. Te dejo apuntada la cita{service_part} {VoiceCopy._slot_to_confirmation_text(slot)}."
 
     @staticmethod
@@ -201,26 +201,26 @@ class VoiceCopy:
         if service:
             return (
                 f"En esta demo no puedo reservar {service}. "
-                "Puedo gestionar valoracion inicial, sesion de fisioterapia o seguimiento. "
+                "Puedo gestionar valoración inicial, sesión de fisioterapia o seguimiento. "
                 "Si necesitas otro servicio, te derivamos a una persona del equipo."
             )
         return (
             "En esta demo no puedo reservar ese servicio. "
-            "Puedo gestionar valoracion inicial, sesion de fisioterapia o seguimiento. "
+            "Puedo gestionar valoración inicial, sesión de fisioterapia o seguimiento. "
             "Si necesitas otro servicio, te derivamos a una persona del equipo."
         )
 
     @staticmethod
     def no_idea_service() -> str:
-        return f"{uncertain_service_answer('voice')} Que te apetece?"
+        return f"{uncertain_service_answer('voice')} ¿Qué te apetece?"
 
     @staticmethod
     def no_idea_date() -> str:
-        return "No pasa nada. Dime un dia que te vaya bien."
+        return "No pasa nada. Dime un día que te vaya bien."
 
     @staticmethod
     def no_idea_slot() -> str:
-        return "Sin problema. Te va mejor la primera o la segunda? Si no, te busco otro dia."
+        return "Sin problema. ¿Te va mejor la primera o la segunda? Si no, te busco otro día."
 
     @staticmethod
     def technical_error() -> str:
@@ -228,11 +228,11 @@ class VoiceCopy:
 
     @staticmethod
     def earlier_or_later() -> str:
-        return "Sin problema. Prefieres antes, mas tarde u otro dia?"
+        return "Sin problema. ¿Prefieres antes, más tarde u otro día?"
 
     @staticmethod
     def another_day() -> str:
-        return "Sin problema. Dime otro dia y lo miro."
+        return "Sin problema. Dime otro día y lo miro."
 
     @staticmethod
     def thanks_closing() -> str:
@@ -246,7 +246,7 @@ class VoiceCopy:
 
     @staticmethod
     def thanks_generic() -> str:
-        return "Gracias a ti. Si necesitas pedir, cambiar o cancelar una cita, aqui estoy."
+        return "Gracias a ti. Si necesitas pedir, cambiar o cancelar una cita, aquí estoy."
 
     @staticmethod
     def farewell_after_booking(slot: str, patient_name: Optional[str] = None) -> str:
@@ -256,11 +256,22 @@ class VoiceCopy:
 
     @staticmethod
     def farewell_generic() -> str:
-        return "Hasta luego. Aqui estoy si necesitas ayuda con tus citas."
+        return "Hasta luego. Aquí estoy si necesitas ayuda con tus citas."
 
     @staticmethod
     def thanks_with_followup(follow_up: str) -> str:
         return f"Gracias a ti. {follow_up}".strip()
+
+    @staticmethod
+    def _display_service(service: Optional[str]) -> str:
+        normalized = (service or "").strip().lower()
+        if "valoracion" in normalized or "valoración" in normalized:
+            return "valoración inicial"
+        if "seguimiento" in normalized:
+            return "consulta de seguimiento"
+        if "fisio" in normalized or "fisioterapia" in normalized:
+            return "sesión de fisioterapia"
+        return (service or "cita").strip()
 
     @staticmethod
     def _first_name(patient_name: Optional[str]) -> Optional[str]:
@@ -276,7 +287,7 @@ class VoiceCopy:
             return None
         pref = ""
         if time_pref == "morning":
-            pref = " por la manana"
+            pref = " por la mañana"
         elif time_pref == "afternoon":
             pref = " por la tarde"
         return f"el {weekday_match.group(1)}{pref}"

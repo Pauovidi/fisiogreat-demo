@@ -4,7 +4,7 @@ import asyncio
 from googleapiclient.errors import HttpError
 
 from app.config.settings import settings
-from app.services import supabase_repo
+from app.services import calendar_service, supabase_repo
 from app.services.booking_service import (
     cancel_appointment,
     confirm_slot,
@@ -23,6 +23,13 @@ class _HttpResponse:
 
     def get(self, _key, default=None):
         return default
+
+
+def _busy(day: dt.date, start_time: dt.time, end_time: dt.time):
+    return {
+        "start": dt.datetime.combine(day, start_time).isoformat(),
+        "end": dt.datetime.combine(day, end_time).isoformat(),
+    }
 
 
 def test_booking_service_confirms_mock_appointment():
@@ -348,18 +355,104 @@ def test_booking_service_keeps_searching_after_busy_candidates(monkeypatch):
     start = (dt.datetime.now() + dt.timedelta(days=7)).replace(hour=10, minute=0, second=0, microsecond=0)
     calls = []
 
-    def fake_free_busy(*_args, **_kwargs):
-        calls.append(_args)
-        if len(calls) <= 6:
-            return [{"start": "busy", "end": "busy"}]
+    def fake_free_busy(start_at, end_at, **kwargs):
+        calls.append((start_at, end_at, kwargs))
+        return [_busy(start.date(), dt.time(10, 0), dt.time(11, 0))]
+
+    monkeypatch.setattr("app.services.booking_service.calendar_service.free_busy", fake_free_busy)
+
+    slots = propose_slots(start, "sesion de fisioterapia", count=3, time_pref="morning")
+
+    assert len(slots) == 3
+    assert len(calls) == 1
+    assert slots[0]["start"].time() == dt.time(11, 0)
+
+
+def test_booking_service_propose_slots_uses_single_freebusy_window(monkeypatch):
+    start = (dt.datetime.now() + dt.timedelta(days=7)).replace(hour=11, minute=0, second=0, microsecond=0)
+    calls = []
+
+    def fake_free_busy(start_at, end_at, **kwargs):
+        calls.append((start_at, end_at, kwargs))
         return []
 
     monkeypatch.setattr("app.services.booking_service.calendar_service.free_busy", fake_free_busy)
 
-    slots = propose_slots(start, "sesion de fisioterapia", count=3)
+    slots = propose_slots(start, "sesion de fisioterapia", count=3, time_pref="morning")
 
     assert len(slots) == 3
-    assert len(calls) > 6
+    assert len(calls) == 1
+    assert calls[0][0] == dt.datetime.combine(start.date(), dt.time(10, 0))
+    assert calls[0][1] == dt.datetime.combine(start.date(), dt.time(15, 0))
+
+
+def test_booking_service_propose_slots_returns_two_one_or_zero_from_busy_window(monkeypatch):
+    start = (dt.datetime.now() + dt.timedelta(days=7)).replace(hour=11, minute=0, second=0, microsecond=0)
+
+    monkeypatch.setattr(
+        "app.services.booking_service.calendar_service.free_busy",
+        lambda *_args, **_kwargs: [_busy(start.date(), dt.time(11, 0), dt.time(15, 0))],
+    )
+    assert [slot["start"].time() for slot in propose_slots(start, "sesion de fisioterapia", count=3, time_pref="morning")] == [
+        dt.time(10, 0),
+        dt.time(10, 15),
+    ]
+
+    monkeypatch.setattr(
+        "app.services.booking_service.calendar_service.free_busy",
+        lambda *_args, **_kwargs: [_busy(start.date(), dt.time(10, 45), dt.time(15, 0))],
+    )
+    assert [slot["start"].time() for slot in propose_slots(start, "sesion de fisioterapia", count=3, time_pref="morning")] == [
+        dt.time(10, 0),
+    ]
+
+    monkeypatch.setattr(
+        "app.services.booking_service.calendar_service.free_busy",
+        lambda *_args, **_kwargs: [_busy(start.date(), dt.time(10, 0), dt.time(15, 0))],
+    )
+    assert propose_slots(start, "sesion de fisioterapia", count=3, time_pref="morning") == []
+
+
+def test_booking_service_propose_slots_ignores_original_event_and_cancelled_events():
+    CALENDAR_STORE.reset()
+    start = (dt.datetime.now() + dt.timedelta(days=7)).replace(hour=10, minute=0, second=0, microsecond=0)
+    original_id = calendar_service.create_event(
+        event_id="original-event",
+        summary="Original",
+        start_at=start,
+        end_at=start + dt.timedelta(minutes=45),
+    )
+    blocked_without_ignore = propose_slots(start, "sesion de fisioterapia", count=1, time_pref="morning")
+    ignored = propose_slots(
+        start,
+        "sesion de fisioterapia",
+        count=1,
+        ignore_calendar_event_id=original_id,
+        time_pref="morning",
+    )
+
+    assert blocked_without_ignore[0]["start"].time() == dt.time(10, 45)
+    assert ignored[0]["start"].time() == dt.time(10, 0)
+
+    CALENDAR_STORE.reset()
+    cancelled_id = calendar_service.create_event(
+        event_id="cancelled-event",
+        summary="Cancelled",
+        start_at=start,
+        end_at=start + dt.timedelta(minutes=45),
+    )
+    calendar_service.delete_event(cancelled_id)
+    slots = propose_slots(start, "sesion de fisioterapia", count=1, time_pref="morning")
+    assert slots[0]["start"].time() == dt.time(10, 0)
+
+
+def test_booking_service_propose_slots_does_not_jump_to_another_day():
+    start = (dt.datetime.now() + dt.timedelta(days=7)).replace(hour=16, minute=0, second=0, microsecond=0)
+
+    slots = propose_slots(start, "sesion de fisioterapia", count=24, time_pref="afternoon")
+
+    assert slots
+    assert {slot["start"].date() for slot in slots} == {start.date()}
 
 
 def test_list_future_appointments_filters_patient_status_past_and_calendar_event():

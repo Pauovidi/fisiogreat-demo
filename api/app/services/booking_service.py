@@ -1,5 +1,6 @@
 import datetime as dt
 import re
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
@@ -8,7 +9,7 @@ from ..config.settings import settings
 from ..utils.logger import logger
 from . import calendar_service
 from . import supabase_repo
-from .slots import BusinessRules, ServiceCatalog, propose_slots as local_propose_slots
+from .slots import BusinessRules, ServiceCatalog
 
 
 FISIO_SERVICE_DURATIONS = {
@@ -52,50 +53,168 @@ def propose_slots(
     *,
     count: int = 6,
     ignore_calendar_event_id: Optional[str] = None,
+    time_pref: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     duration = service_duration_minutes(service_type)
     rules = BusinessRules()
-    candidate_limit = max(count * 12, 48)
-    search_window_start = preferred - dt.timedelta(hours=2)
-    search_window_end = preferred + dt.timedelta(days=1)
-    candidates = local_propose_slots(
-        preferred,
-        _normalize_service(service_type),
+    search_window = _slot_search_window(preferred.date(), rules, time_pref)
+    if not search_window:
+        _log_slot_search(
+            count=count,
+            found_count=0,
+            search_date=preferred.date(),
+            window_start=preferred,
+            window_end=preferred,
+            freebusy_calls_count=0,
+            latency_ms=0.0,
+            busy_intervals_count=0,
+            skipped_busy_count=0,
+            skipped_original_slot_count=0,
+        )
+        return []
+    search_window_start, search_window_end = search_window
+    freebusy_started = time.perf_counter()
+    busy_intervals = (
+        calendar_service.free_busy(search_window_start, search_window_end, ignore_event_id=ignore_calendar_event_id)
+        if ignore_calendar_event_id
+        else calendar_service.free_busy(search_window_start, search_window_end)
+    )
+    freebusy_latency_ms = (time.perf_counter() - freebusy_started) * 1000
+    candidates = _candidate_slots_for_window(
+        search_window_start,
+        search_window_end,
+        service_type,
+        duration,
         rules,
-        max_candidates=candidate_limit,
+        max_candidates=max(count * 12, 48),
     )
     slots: List[Dict[str, Any]] = []
     skipped_busy_count = 0
-    busy_intervals_count = 0
     for candidate in candidates:
         start_at = candidate["start"]
         end_at = start_at + dt.timedelta(minutes=duration)
-        busy = (
-            calendar_service.free_busy(start_at, end_at, ignore_event_id=ignore_calendar_event_id)
-            if ignore_calendar_event_id
-            else calendar_service.free_busy(start_at, end_at)
-        )
-        busy_intervals_count += len(busy)
-        if busy:
+        if _candidate_overlaps_busy(start_at, end_at, busy_intervals):
             skipped_busy_count += 1
             continue
         slots.append({"start": start_at, "end": end_at, "service": service_type})
         if len(slots) >= count:
             break
-    logger.info(
-        "slot_search slots_requested_count=%s slots_found_count=%s slot_search_date=%s "
-        "slot_search_window_start=%s slot_search_window_end=%s busy_intervals_count=%s "
-        "skipped_busy_count=%s skipped_original_slot_count=%s",
+    _log_slot_search(
         count,
         len(slots),
-        preferred.date().isoformat(),
-        search_window_start.isoformat(),
-        search_window_end.isoformat(),
-        busy_intervals_count,
+        preferred.date(),
+        search_window_start,
+        search_window_end,
+        1,
+        freebusy_latency_ms,
+        len(busy_intervals),
         skipped_busy_count,
         0,
     )
     return slots
+
+
+def _slot_search_window(
+    target_date: dt.date,
+    rules: BusinessRules,
+    time_pref: Optional[str],
+) -> Optional[tuple[dt.datetime, dt.datetime]]:
+    open_hours = rules.open_week.get(target_date.weekday())
+    if not open_hours:
+        return None
+    open_start = dt.datetime.combine(target_date, _parse_hhmm(open_hours[0]))
+    open_end = dt.datetime.combine(target_date, _parse_hhmm(open_hours[1]))
+
+    if time_pref == "morning":
+        open_end = min(open_end, dt.datetime.combine(target_date, dt.time(15, 0)))
+    elif time_pref == "afternoon":
+        open_start = max(open_start, dt.datetime.combine(target_date, dt.time(15, 0)))
+
+    if open_start >= open_end:
+        return None
+    return open_start, open_end
+
+
+def _candidate_slots_for_window(
+    window_start: dt.datetime,
+    window_end: dt.datetime,
+    service_type: str,
+    duration_minutes: int,
+    rules: BusinessRules,
+    *,
+    max_candidates: int,
+) -> List[Dict[str, Any]]:
+    cursor = _ceil_to_step(window_start)
+    min_start = dt.datetime.now() + dt.timedelta(minutes=rules.min_lead_minutes)
+    if min_start.date() == window_start.date() and min_start > cursor:
+        cursor = _ceil_to_step(min_start)
+
+    candidates: List[Dict[str, Any]] = []
+    step = dt.timedelta(minutes=15)
+    while cursor.date() == window_start.date() and cursor < window_end and len(candidates) < max_candidates:
+        service_end = cursor + dt.timedelta(minutes=duration_minutes)
+        buffered_end = cursor + dt.timedelta(minutes=duration_minutes + rules.buffer_min)
+        if service_end <= window_end and buffered_end <= window_end:
+            candidates.append({"start": cursor, "end": service_end, "service": service_type})
+        cursor += step
+    return candidates
+
+
+def _candidate_overlaps_busy(start_at: dt.datetime, end_at: dt.datetime, busy_intervals: List[Dict[str, str]]) -> bool:
+    start_aware = calendar_service.ensure_aware(start_at, settings.GOOGLE_CALENDAR_TIMEZONE)
+    end_aware = calendar_service.ensure_aware(end_at, settings.GOOGLE_CALENDAR_TIMEZONE)
+    for period in busy_intervals:
+        try:
+            busy_start = calendar_service.ensure_aware(period["start"], settings.GOOGLE_CALENDAR_TIMEZONE)
+            busy_end = calendar_service.ensure_aware(period["end"], settings.GOOGLE_CALENDAR_TIMEZONE)
+        except Exception:
+            continue
+        if start_aware < busy_end and busy_start < end_aware:
+            return True
+    return False
+
+
+def _ceil_to_step(value: dt.datetime, minutes: int = 15) -> dt.datetime:
+    clean = value.replace(second=0, microsecond=0)
+    remainder = clean.minute % minutes
+    if remainder:
+        clean += dt.timedelta(minutes=minutes - remainder)
+    return clean
+
+
+def _parse_hhmm(value: str) -> dt.time:
+    hour, minute = map(int, value.split(":"))
+    return dt.time(hour=hour, minute=minute)
+
+
+def _log_slot_search(
+    count: int,
+    found_count: int,
+    search_date: dt.date,
+    window_start: dt.datetime,
+    window_end: dt.datetime,
+    freebusy_calls_count: int,
+    latency_ms: float,
+    busy_intervals_count: int,
+    skipped_busy_count: int,
+    skipped_original_slot_count: int,
+) -> None:
+    logger.info(
+        "slot_search slot_search_mode=batch_freebusy freebusy_calls_count=%s "
+        "slots_requested_count=%s slots_found_count=%s slot_search_date=%s "
+        "slot_search_window_start=%s slot_search_window_end=%s slot_search_latency_ms=%.1f "
+        "busy_intervals_count=%s skipped_busy_count=%s skipped_original_slot_count=%s",
+        freebusy_calls_count,
+        count,
+        found_count,
+        search_date.isoformat(),
+        window_start.isoformat(),
+        window_end.isoformat(),
+        latency_ms,
+        busy_intervals_count,
+        skipped_busy_count,
+        skipped_original_slot_count,
+    )
 
 
 async def confirm_slot(

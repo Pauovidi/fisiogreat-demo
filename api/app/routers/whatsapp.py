@@ -111,6 +111,7 @@ def _build_slot_labels(
             preferred_dt,
             service,
             ignore_calendar_event_id=ignore_calendar_event_id,
+            time_pref=time_pref,
         )
     except Exception as exc:
         logger.warning(f"WA slot generation fallback for {service}: {exc}")

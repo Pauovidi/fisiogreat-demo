@@ -51,7 +51,7 @@ def test_extract_contact_accepts_digit_and_spoken_phones(spoken, expected):
     assert email is None
 
 
-@pytest.mark.parametrize("spoken", ["un email", "email", "correo electronico", "prefiero email"])
+@pytest.mark.parametrize("spoken", ["un email", "un correo", "email", "correo electronico", "prefiero email"])
 def test_requests_email_contact_detects_intent_without_treating_it_as_email(spoken):
     assert extract_contact(spoken) == (None, None)
     assert requests_email_contact(spoken) is True
