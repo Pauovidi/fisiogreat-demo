@@ -37,6 +37,8 @@ def root():
 # Importar routers
 from .routers.whatsapp import router as whatsapp_router
 from .routers.voice import router as voice_router
+from .routers.openai_realtime import router as openai_realtime_router
 
 app.include_router(whatsapp_router)
 app.include_router(voice_router)
+app.include_router(openai_realtime_router)

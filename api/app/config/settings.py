@@ -9,6 +9,17 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: Optional[str] = None
     VOICE_AI_ENABLED: bool = False
 
+    # OpenAI Realtime V2 (experimental/shadow)
+    OPENAI_REALTIME_ENABLED: bool = False
+    OPENAI_REALTIME_MODEL: str = "gpt-realtime-2"
+    OPENAI_REALTIME_VOICE: str = "marin"
+    OPENAI_REALTIME_INSTRUCTIONS_VERSION: str = "fisiogreat-v2"
+    OPENAI_REALTIME_TRANSPORT: str = "sip"
+    OPENAI_REALTIME_WEBHOOK_SECRET: Optional[str] = None
+    OPENAI_REALTIME_LOG_LEVEL: str = "info"
+    OPENAI_REALTIME_SHADOW_MODE: bool = True
+    OPENAI_REALTIME_WRITE_ENABLED: bool = False
+
     USE_REAL_CALENDAR: bool = False
     USE_REAL_SUPABASE: bool = False
     USE_REAL_TWILIO: bool = False
