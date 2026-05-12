@@ -117,7 +117,7 @@ def test_voice_basic_booking_and_faq_are_fisiogreat():
     assert "tengo" in day.text.lower()
 
     pick = post_voice(call_sid, SpeechResult="segunda")
-    assert "telefono" in pick.text.lower() or "correo" in pick.text.lower()
+    assert "teléfono" in pick.text.lower() or "telefono" in pick.text.lower() or "email" in pick.text.lower()
     contact = post_voice(call_sid, SpeechResult="mi email es pau@example.com")
     assert "gracias" in contact.text.lower()
     assert len(STORE.appointments) == 1
@@ -142,7 +142,7 @@ def test_voice_physiotherapy_requires_reason_and_contact_before_confirmation():
     post_voice(call_sid, SpeechResult="jueves")
     contact_prompt = post_voice(call_sid, SpeechResult="primera")
 
-    assert "telefono" in contact_prompt.text.lower() or "correo" in contact_prompt.text.lower()
+    assert "teléfono" in contact_prompt.text.lower() or "telefono" in contact_prompt.text.lower() or "email" in contact_prompt.text.lower()
     assert CTX.get_stage(call_sid) == "awaiting_contact"
     assert not STORE.appointments
 
@@ -180,6 +180,68 @@ def test_voice_unparsed_date_does_not_offer_slots_from_stored_state(monkeypatch)
     assert "no he entendido bien el dia" in response.text.lower()
     assert CTX.get_stage(call_sid) == "awaiting_date"
     assert CTX.get(call_sid)["offered_slots"] == []
+
+
+def test_voice_weekday_mismatch_does_not_offer_wrong_day(monkeypatch):
+    call_sid = "CA-voice-date-weekday-mismatch"
+    reset_state(call_sid)
+
+    post_voice(call_sid)
+    post_voice(call_sid, SpeechResult="valoracion inicial")
+    post_voice(call_sid, SpeechResult="Pau Marco")
+    monkeypatch.setattr("app.utils.date_parser.parse_spanish_day", lambda *_args, **_kwargs: dt.date(2026, 5, 13))
+    CTX.set_date(call_sid, dt.date(2026, 5, 12))
+    response = post_voice(call_sid, SpeechResult="el jueves por la mañana")
+
+    assert "creo que he entendido jueves" in response.text.lower()
+    assert CTX.get_stage(call_sid) == "awaiting_date"
+    assert CTX.get(call_sid)["date_pref"] is None
+    assert CTX.get(call_sid)["offered_slots"] == []
+
+
+def test_voice_offering_slots_selects_la_primera_without_repeating():
+    call_sid = "CA-voice-slot-la-primera"
+    reset_state(call_sid)
+
+    post_voice(call_sid)
+    post_voice(call_sid, SpeechResult="valoracion inicial")
+    post_voice(call_sid, SpeechResult="Pau Marco")
+    post_voice(call_sid, SpeechResult="jueves")
+    contact_prompt = post_voice(call_sid, SpeechResult="la primera")
+
+    assert CTX.get_stage(call_sid) == "awaiting_contact"
+    assert "tengo estas opciones" not in contact_prompt.text.lower()
+    assert "email" in contact_prompt.text.lower() or "teléfono" in contact_prompt.text.lower()
+
+
+@pytest.mark.parametrize(
+    ("selection", "expected_slot"),
+    [
+        ("la primera", "jueves 14/05 a las 10:00"),
+        ("primera", "jueves 14/05 a las 10:00"),
+        ("opción uno", "jueves 14/05 a las 10:00"),
+        ("la segunda", "jueves 14/05 a las 10:15"),
+    ],
+)
+def test_voice_offering_slots_selection_variants_choose_slot_before_fallback(selection, expected_slot):
+    call_sid = f"CA-voice-slot-variant-{selection.replace(' ', '-')}"
+    reset_state(call_sid)
+    CTX.set_service(call_sid, "valoracion inicial")
+    CTX.set_slots(
+        call_sid,
+        [
+            "jueves 14/05 a las 10:00",
+            "jueves 14/05 a las 10:15",
+            "jueves 14/05 a las 10:30",
+        ],
+    )
+    CTX.set_stage(call_sid, "offering_slots")
+
+    response = post_voice(call_sid, SpeechResult=selection)
+
+    assert CTX.get_stage(call_sid) == "awaiting_contact"
+    assert CTX.get(call_sid)["pending_slot"] == expected_slot
+    assert "tengo estas opciones" not in response.text.lower()
 
 
 @pytest.mark.parametrize(
@@ -266,6 +328,26 @@ def test_voice_confirms_with_spoken_email_and_stores_normalized_contact():
     assert appointment["metadata"]["contact_channel_preference"] == "email"
 
 
+def test_voice_awaiting_contact_accepts_email_request_then_spoken_email():
+    call_sid = "CA-voice-email-request"
+    reset_state(call_sid)
+
+    post_voice(call_sid)
+    post_voice(call_sid, SpeechResult="valoracion inicial")
+    post_voice(call_sid, SpeechResult="Pau Marco")
+    post_voice(call_sid, SpeechResult="jueves")
+    post_voice(call_sid, SpeechResult="primera")
+
+    ask_email = post_voice(call_sid, SpeechResult="un email")
+    assert "perfecto, dime el email" in ask_email.text.lower()
+    assert CTX.get_stage(call_sid) == "awaiting_contact"
+    response = post_voice(call_sid, SpeechResult="mi email es marcos arroba ejemplo punto com")
+
+    assert "gracias" in response.text.lower()
+    appointment = next(iter(STORE.appointments.values()))
+    assert appointment["metadata"]["contact_email"] == "marcos@ejemplo.com"
+
+
 def test_voice_reprompts_invalid_contact_without_booking():
     call_sid = "CA-voice-invalid-contact-1"
     reset_state(call_sid)
@@ -325,7 +407,7 @@ def test_voice_confirms_with_valid_phone_and_can_confirm_from_number():
     post_voice(from_sid, SpeechResult="Pau Marco")
     post_voice(from_sid, SpeechResult="jueves")
     prompt = post_voice(from_sid, SpeechResult="primera", From="+34640786765")
-    assert "este numero" in prompt.text.lower()
+    assert "este número" in prompt.text.lower() or "este numero" in prompt.text.lower()
     response = post_voice(from_sid, SpeechResult="si a este numero")
 
     assert "gracias" in response.text.lower()

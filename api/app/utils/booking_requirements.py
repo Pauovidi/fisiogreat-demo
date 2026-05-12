@@ -77,6 +77,25 @@ def confirms_current_phone(value: str) -> bool:
     }
 
 
+def requests_email_contact(value: str) -> bool:
+    normalized = normalize_text(value)
+    if extract_email(value):
+        return False
+    return normalized in {
+        "email",
+        "un email",
+        "correo",
+        "un correo",
+        "correo electronico",
+        "un correo electronico",
+        "prefiero email",
+        "por email",
+        "mejor email",
+        "por correo",
+        "mejor por correo",
+    }
+
+
 EMAIL_PREFIX_PATTERNS = [
     r"^(?:mi\s+)?(?:e\s*-?\s*mail|email|correo|correo electronico)\s+(?:es\s+)?",
     r"^(?:el\s+)?(?:e\s*-?\s*mail|email|correo|correo electronico)\s+(?:es\s+)?",

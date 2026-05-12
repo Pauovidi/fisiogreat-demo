@@ -28,6 +28,24 @@ def test_voice_slot_offer_copy_for_single_slot_is_explicit():
     assert "di primera si te encaja" in text
 
 
+def test_voice_no_slots_copy_mentions_validated_day():
+    text = VOICE_COPY.no_slots_for_day(dt.date(2026, 5, 14), time_pref="morning").lower()
+
+    assert "para el jueves por la manana no veo huecos libres" in text
+    assert "otro día" in text
+
+
+def test_voice_contact_prompt_is_complete():
+    text = VOICE_COPY.ask_contact_with_phone_suggestion()
+
+    assert text == (
+        "Para enviarte la confirmación y el recordatorio, ¿quieres que use este número "
+        "de llamada o prefieres darme otro teléfono o un email?"
+    )
+    assert not text.rstrip(" ?").endswith(("un", "o un"))
+    assert "un..." not in text
+
+
 def test_voice_slot_builder_offers_three_when_available(monkeypatch):
     monkeypatch.setattr("app.routers.voice.booking_propose_slots", lambda *_args, **_kwargs: [_slot(10), _slot(10, 15), _slot(10, 30)])
 

@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from ..config.settings import settings
-from ..utils.date_parser import parse_spanish_day, parse_time_pref
+from ..utils.date_parser import VoiceDateParse, parse_voice_date
 from ..utils.emergency_guard import detect_emergency, emergency_reply
 from ..utils.intent_router import detect_service, normalize_text, route_message
 from ..utils.booking_requirements import (
@@ -13,6 +13,7 @@ from ..utils.booking_requirements import (
     confirms_current_phone,
     extract_contact,
     is_physiotherapy_session,
+    requests_email_contact,
 )
 from ..utils.confirmation import (
     cancel_selection_implies_confirmation,
@@ -28,7 +29,7 @@ from ..utils.appointment_options import (
     format_appointment_option_voice,
     pick_appointment_option,
 )
-from ..utils.slot_picker import pick_slot
+from ..utils.slot_picker import pick_slot_with_index
 from ..utils.voice_copy import VOICE_COPY as copy
 from .natural_turn import NaturalTurnResult, maybe_handle_natural_turn
 from .salon_knowledge import out_of_scope_answer
@@ -103,6 +104,9 @@ def _log_conversationrelay_turn(
     contact_phone, contact_email = extract_contact(user_text)
     masked_user_text = mask_sensitive_text(user_text)
     masked_normalized_text = masked_user_text if (contact_phone or contact_email) else mask_sensitive_text(normalized_text)
+    date_parse = parse_voice_date(user_text)
+    parsed_date = date_parse.raw_target_date
+    slot_selection = ctx.pop("_last_slot_selection", {}) if ctx else {}
     payload = {
         "call_sid": key,
         "user_text": masked_user_text,
@@ -125,10 +129,15 @@ def _log_conversationrelay_turn(
         "bot_reply": mask_sensitive_text(bot_reply),
         "voice_date_raw": masked_user_text,
         "voice_date_normalized": masked_normalized_text,
-        "parsed_target_date": _date_iso(parse_spanish_day(user_text)),
-        "parsed_weekday": _weekday_name(parse_spanish_day(user_text)),
-        "date_source": "current_turn" if parse_spanish_day(user_text) else ("stored_state" if ctx.get("date_pref") else "fallback"),
-        "time_preference": parse_time_pref(user_text) or ctx.get("time_pref") or ctx_before.get("time_pref"),
+        "explicit_weekday": _weekday_label(date_parse.explicit_weekday),
+        "parsed_target_date": _date_iso(parsed_date),
+        "parsed_weekday": _weekday_name(parsed_date),
+        "date_validation_result": date_parse.validation_result,
+        "date_source": _date_source_for(date_parse, ctx, ctx_before),
+        "time_preference": date_parse.time_pref or ctx.get("time_pref") or ctx_before.get("time_pref"),
+        "slot_selection_raw": mask_sensitive_text(slot_selection.get("raw", "")),
+        "selected_slot_index": slot_selection.get("index"),
+        "selected_slot_label": slot_selection.get("label"),
     }
     logger.info("conversationrelay_turn " + " ".join(f"{key}={payload[key]!r}" for key in payload))
 
@@ -139,6 +148,37 @@ def _date_iso(value: Optional[dt.date]) -> Optional[str]:
 
 def _weekday_name(value: Optional[dt.date]) -> Optional[str]:
     return WEEKDAY_LABELS[value.weekday()] if value else None
+
+
+def _weekday_label(weekday: Optional[int]) -> Optional[str]:
+    return WEEKDAY_LABELS[weekday] if weekday is not None else None
+
+
+def _date_source_for(
+    result: VoiceDateParse,
+    ctx: Optional[Dict[str, Any]] = None,
+    ctx_before: Optional[Dict[str, Any]] = None,
+) -> str:
+    if result.target_date or result.explicit_weekday is not None:
+        return "current_turn"
+    ctx = ctx or {}
+    ctx_before = ctx_before or {}
+    if ctx.get("date_pref") or ctx_before.get("date_pref"):
+        return "stored_state"
+    return "fallback"
+
+
+def _date_clarification(result: VoiceDateParse) -> str:
+    return copy.clarify_weekday(_weekday_label(result.explicit_weekday))
+
+
+def _remember_slot_selection(key: str, raw: str, selected_index: int, selected_label: str) -> None:
+    ctx = CTX.get(key) or {}
+    ctx["_last_slot_selection"] = {
+        "raw": raw,
+        "index": selected_index + 1,
+        "label": selected_label,
+    }
 
 
 @dataclass
@@ -338,10 +378,12 @@ def _ask_new_day_for_selected(key: str, appointment: Dict[str, Any]) -> str:
 
 async def _confirm_reschedule_slot(key: str, user_text: str) -> str:
     current = _current_slots(key)
-    selected = pick_slot(user_text, current)
+    picked = pick_slot_with_index(user_text, current)
+    selected = picked[1] if picked else None
     if not selected:
         ctx = CTX.get(key) or {}
         return copy.propose_slots(current, time_pref=ctx.get("time_pref"))
+    _remember_slot_selection(key, user_text, picked[0], selected)
     appointment = _selected_appointment(key, action="reschedule")
     selected_dt = parse_slot_label(selected)
     if not appointment or not selected_dt:
@@ -508,10 +550,20 @@ async def _handle_user_input_core(key: str, user_text: str) -> str:
         return _ask_new_day_for_selected(key, appointment)
 
     if current_stage == "awaiting_reschedule_date":
-        parsed_date = parse_spanish_day(user_text)
+        date_parse = parse_voice_date(user_text)
         appointment = _selected_appointment(key, action="reschedule")
-        if parsed_date and appointment:
-            return _offer_slots(key, appointment.get("service_type") or "sesion de fisioterapia", parsed_date, parse_time_pref(user_text), stage="offering_reschedule_slots")
+        if date_parse.target_date and appointment:
+            return _offer_slots(
+                key,
+                appointment.get("service_type") or "sesion de fisioterapia",
+                date_parse.target_date,
+                date_parse.time_pref,
+                stage="offering_reschedule_slots",
+            )
+        if date_parse.validation_result == "mismatch":
+            CTX.set_date(key, None)
+            CTX.set_time_pref(key, None)
+            return _date_clarification(date_parse)
         return copy.ask_date_retry()
 
     if current_stage == "offering_reschedule_slots":
@@ -519,8 +571,9 @@ async def _handle_user_input_core(key: str, user_text: str) -> str:
 
     if current_stage == "awaiting_service":
         service = detect_service(user_text)
-        parsed_date = parse_spanish_day(user_text)
-        time_pref = parse_time_pref(user_text)
+        date_parse = parse_voice_date(user_text)
+        parsed_date = date_parse.target_date
+        time_pref = date_parse.time_pref
 
         if route_peek["type"] in {"faq", "human_handoff", "uncertain"}:
             natural = await maybe_handle_natural_turn(key, user_text, page_size=CR_SLOT_PAGE_SIZE)
@@ -539,6 +592,11 @@ async def _handle_user_input_core(key: str, user_text: str) -> str:
             return await _start_appointment_action(key, action="reschedule")
         if route_peek["type"] == "booking" and not service:
             return copy.ask_service_for_booking()
+
+        if service and date_parse.validation_result == "mismatch":
+            CTX.set_service(key, service)
+            CTX.set_stage(key, "awaiting_date")
+            return _date_clarification(date_parse)
 
         if service and parsed_date:
             CTX.set_service(key, service)
@@ -607,8 +665,9 @@ async def _handle_user_input_core(key: str, user_text: str) -> str:
         return copy.thanks_name_then_date(first_name(patient_name) or patient_name)
 
     if current_stage == "awaiting_date":
-        parsed_date = parse_spanish_day(user_text)
-        time_pref = parse_time_pref(user_text)
+        date_parse = parse_voice_date(user_text)
+        parsed_date = date_parse.target_date
+        time_pref = date_parse.time_pref
         route_peek = route_message(user_text)
 
         if parsed_date:
@@ -624,6 +683,11 @@ async def _handle_user_input_core(key: str, user_text: str) -> str:
                 return copy.ask_consultation_reason()
             return _offer_slots(key, service, parsed_date, time_pref)
 
+        if date_parse.validation_result == "mismatch":
+            CTX.set_date(key, None)
+            CTX.set_time_pref(key, None)
+            return _date_clarification(date_parse)
+
         if time_pref:
             ctx = CTX.get(key) or {}
             CTX.set_time_pref(key, time_pref)
@@ -637,9 +701,11 @@ async def _handle_user_input_core(key: str, user_text: str) -> str:
 
     if current_stage == "offering_slots":
         current = _current_slots(key)
-        selected = pick_slot(user_text, current)
-        reparsed_date = parse_spanish_day(user_text)
-        reparsed_time = parse_time_pref(user_text)
+        picked = pick_slot_with_index(user_text, current)
+        selected = picked[1] if picked else None
+        date_parse = parse_voice_date(user_text)
+        reparsed_date = date_parse.target_date
+        reparsed_time = date_parse.time_pref
         route_peek = route_message(user_text)
         ctx = CTX.get(key) or {}
 
@@ -649,11 +715,18 @@ async def _handle_user_input_core(key: str, user_text: str) -> str:
             if selected_dt:
                 CTX.set_pending_slot(key, selected)
                 CTX.set_stage(key, "awaiting_contact")
+                _remember_slot_selection(key, user_text, picked[0], selected)
                 return _contact_prompt(key)
 
         service = ctx.get("service")
         date_pref = ctx.get("date_pref")
         current_pref = ctx.get("time_pref")
+
+        if date_parse.validation_result == "mismatch":
+            CTX.set_date(key, None)
+            CTX.set_time_pref(key, None)
+            CTX.set_stage(key, "awaiting_date")
+            return _date_clarification(date_parse)
 
         if reparsed_date and service:
             return _offer_slots(key, service, reparsed_date, reparsed_time or ctx.get("time_pref"))
@@ -700,6 +773,8 @@ async def _handle_user_input_core(key: str, user_text: str) -> str:
         phone, email = extract_contact(user_text)
         if not phone and not email and confirms_current_phone(user_text) and ctx.get("suggested_contact_phone"):
             phone = ctx.get("suggested_contact_phone")
+        if not phone and not email and requests_email_contact(user_text):
+            return copy.ask_contact_email()
         if not phone and not email:
             return _contact_retry_prompt(key)
         ctx["contact_parse_failures"] = 0
@@ -815,7 +890,10 @@ def _offer_slots(
         ),
     )
     CTX.set_stage(key, stage)
-    return copy.propose_slots(CTX.next_slots(key, CR_SLOT_PAGE_SIZE), time_pref=time_pref)
+    visible_slots = CTX.next_slots(key, CR_SLOT_PAGE_SIZE)
+    if not visible_slots:
+        return copy.no_slots_for_day(parsed_date, time_pref=time_pref)
+    return copy.propose_slots(visible_slots, time_pref=time_pref)
 
 
 def _reprompt_for_stage(key: str) -> str:

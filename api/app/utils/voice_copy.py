@@ -1,3 +1,4 @@
+import datetime as dt
 import re
 from typing import List, Optional
 
@@ -95,14 +96,15 @@ class VoiceCopy:
 
     @staticmethod
     def ask_contact() -> str:
-        return "Para enviarte la confirmacion y el recordatorio, me das un telefono movil o un correo electronico?"
+        return "Para enviarte la confirmación y el recordatorio, ¿me das un teléfono móvil o un email?"
 
     @staticmethod
     def ask_contact_with_phone_suggestion() -> str:
-        return (
-            "Para enviarte la confirmacion y el recordatorio, quieres que use este numero "
-            "de llamada o prefieres darme otro telefono o un email?"
-        )
+        return "Para enviarte la confirmación y el recordatorio, ¿quieres que use este número de llamada o prefieres darme otro teléfono o un email?"
+
+    @staticmethod
+    def ask_contact_email() -> str:
+        return "Perfecto, dime el email. Puedes decirlo como marcos arroba ejemplo punto com."
 
     @staticmethod
     def ask_contact_retry(attempt: int = 1) -> str:
@@ -139,6 +141,12 @@ class VoiceCopy:
         return "No he entendido bien el dia. Puedes decirme, por ejemplo, manana, jueves o el viernes por la manana."
 
     @staticmethod
+    def clarify_weekday(weekday: Optional[str]) -> str:
+        if weekday:
+            return f"Creo que he entendido {weekday}. ¿Te refieres al próximo {weekday}?"
+        return VoiceCopy.ask_date_retry()
+
+    @staticmethod
     def ask_time_pref() -> str:
         return "Te va mejor por la manana o por la tarde?"
 
@@ -160,6 +168,24 @@ class VoiceCopy:
         if day_context:
             return f"Para {day_context} tengo estas opciones: {spoken[0]}, {spoken[1]} y {spoken[2]}. Di primera, segunda o tercera."
         return f"Tengo {spoken[0]}, {spoken[1]} y {spoken[2]}. Di primera, segunda o tercera."
+
+    @staticmethod
+    def no_slots_for_day(date_pref: dt.date, *, time_pref: Optional[str] = None) -> str:
+        weekday = [
+            "lunes",
+            "martes",
+            "miércoles",
+            "jueves",
+            "viernes",
+            "sábado",
+            "domingo",
+        ][date_pref.weekday()]
+        pref = ""
+        if time_pref == "morning":
+            pref = " por la manana"
+        elif time_pref == "afternoon":
+            pref = " por la tarde"
+        return f"Para el {weekday}{pref} no veo huecos libres. ¿Quieres que miremos otro día?"
 
     @staticmethod
     def confirm_booking(slot: str, service: Optional[str] = None, patient_name: Optional[str] = None) -> str:

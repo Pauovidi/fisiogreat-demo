@@ -29,7 +29,7 @@ from ..services.booking_service import (
 )
 from ..services.natural_turn import maybe_handle_natural_turn
 from ..services.salon_knowledge import out_of_scope_answer
-from ..utils.date_parser import parse_spanish_day, parse_time_pref
+from ..utils.date_parser import VoiceDateParse, parse_voice_date
 from ..utils.intent_router import detect_service, route_message
 from ..utils.emergency_guard import detect_emergency, emergency_reply
 from ..utils.booking_requirements import (
@@ -37,6 +37,7 @@ from ..utils.booking_requirements import (
     confirms_current_phone,
     extract_contact,
     is_physiotherapy_session,
+    requests_email_contact,
 )
 from ..utils.confirmation import (
     cancel_selection_implies_confirmation,
@@ -52,7 +53,7 @@ from ..utils.appointment_options import (
     format_appointment_option_voice,
     pick_appointment_option,
 )
-from ..utils.slot_picker import pick_slot
+from ..utils.slot_picker import pick_slot_with_index
 from ..utils.voice_copy import VOICE_COPY as copy
 
 
@@ -230,16 +231,21 @@ def _offer_reschedule_slots(call_sid: str, service: str, parsed_date: dt.date, t
     CTX.set_stage(call_sid, "offering_reschedule_slots")
     stats["slot_ms"] += (time.perf_counter() - slot_start) * 1000
     stats["stage_after"] = "offering_reschedule_slots"
-    return _respond_gather(call_sid, copy.propose_slots(CTX.next_slots(call_sid, VOICE_PAGE_SIZE), time_pref=time_pref), stats)
+    visible_slots = CTX.next_slots(call_sid, VOICE_PAGE_SIZE)
+    if not visible_slots:
+        return _respond_gather(call_sid, copy.no_slots_for_day(parsed_date, time_pref=time_pref), stats)
+    return _respond_gather(call_sid, copy.propose_slots(visible_slots, time_pref=time_pref), stats)
 
 
 async def _confirm_reschedule_slot(call_sid: str, user_text: str, stats: Dict[str, Any]) -> Response:
     current = _current_slots(call_sid)
-    selected = pick_slot(user_text, current)
+    picked = pick_slot_with_index(user_text, current)
+    selected = picked[1] if picked else None
     if not selected:
         stats["stage_after"] = "offering_reschedule_slots"
         ctx = CTX.get(call_sid) or {}
         return _respond_gather(call_sid, copy.propose_slots(current, time_pref=ctx.get("time_pref")), stats)
+    _record_slot_selection(stats, user_text, picked[0], selected)
     appointment = _selected_appointment(call_sid, action="reschedule")
     selected_dt = parse_slot_label(selected)
     if not appointment or not selected_dt:
@@ -351,10 +357,15 @@ def _log_turn(call_sid: str, stats: Dict[str, Any]):
         "total_ms": round(stats.get("total_ms", 0.0), 1),
         "voice_date_raw": mask_sensitive_text(stats.get("voice_date_raw", stats.get("raw", ""))),
         "voice_date_normalized": mask_sensitive_text(stats.get("voice_date_normalized", stats.get("normalized", ""))),
+        "explicit_weekday": stats.get("explicit_weekday"),
         "parsed_target_date": stats.get("parsed_target_date"),
         "parsed_weekday": stats.get("parsed_weekday"),
+        "date_validation_result": stats.get("date_validation_result"),
         "date_source": stats.get("date_source"),
         "time_preference": stats.get("time_preference"),
+        "slot_selection_raw": mask_sensitive_text(stats.get("slot_selection_raw", "")),
+        "selected_slot_index": stats.get("selected_slot_index"),
+        "selected_slot_label": stats.get("selected_slot_label"),
     }
     logger.info(
         "voice_turn "
@@ -393,20 +404,42 @@ def _dummy_slot_labels(date_pref: dt.date, time_pref: Optional[str], count: int)
     return [_format_slot_label(dt.datetime.combine(date_pref, value)) for value in times[:count]]
 
 
-def _record_date_parse(
+def _record_voice_date_parse(
     stats: Dict[str, Any],
     raw: str,
-    parsed_date: Optional[dt.date],
-    time_pref: Optional[str],
+    result: VoiceDateParse,
     *,
     source: str,
 ) -> None:
+    parsed_date = result.raw_target_date
     stats["voice_date_raw"] = raw
     stats["voice_date_normalized"] = _normalize_voice_text(raw)
+    stats["explicit_weekday"] = _weekday_label(result.explicit_weekday)
     stats["parsed_target_date"] = parsed_date.isoformat() if parsed_date else None
     stats["parsed_weekday"] = WEEKDAY_LABELS[parsed_date.weekday()] if parsed_date else None
+    stats["date_validation_result"] = result.validation_result
     stats["date_source"] = source
-    stats["time_preference"] = time_pref
+    stats["time_preference"] = result.time_pref
+
+
+def _weekday_label(weekday: Optional[int]) -> Optional[str]:
+    return WEEKDAY_LABELS[weekday] if weekday is not None else None
+
+
+def _date_source_for(result: VoiceDateParse) -> str:
+    if result.target_date or result.explicit_weekday is not None:
+        return "current_turn"
+    return "fallback"
+
+
+def _date_clarification(result: VoiceDateParse) -> str:
+    return copy.clarify_weekday(_weekday_label(result.explicit_weekday))
+
+
+def _record_slot_selection(stats: Dict[str, Any], raw: str, selected_index: int, selected_label: str) -> None:
+    stats["slot_selection_raw"] = raw
+    stats["selected_slot_index"] = selected_index + 1
+    stats["selected_slot_label"] = selected_label
 
 
 def _parse_start(value: Any) -> Optional[dt.datetime]:
@@ -557,7 +590,10 @@ def _offer_slots(call_sid: str, service: str, parsed_date: dt.date, time_pref: O
     CTX.set_stage(call_sid, "offering_slots")
     stats["slot_ms"] += (time.perf_counter() - slot_start) * 1000
     stats["stage_after"] = "offering_slots"
-    return _respond_gather(call_sid, copy.propose_slots(CTX.next_slots(call_sid, VOICE_PAGE_SIZE), time_pref=time_pref), stats)
+    visible_slots = CTX.next_slots(call_sid, VOICE_PAGE_SIZE)
+    if not visible_slots:
+        return _respond_gather(call_sid, copy.no_slots_for_day(parsed_date, time_pref=time_pref), stats)
+    return _respond_gather(call_sid, copy.propose_slots(visible_slots, time_pref=time_pref), stats)
 
 
 def _shift_slot_offer(call_sid: str, *, direction: str, stats: Dict[str, Any]) -> Optional[Response]:
@@ -897,26 +933,25 @@ async def agent_entry(
             return _ask_new_day_for_selected(CallSid, appointment, stats)
 
         if current_stage == "awaiting_reschedule_date":
-            parsed_date = parse_spanish_day(user_text)
-            time_pref = parse_time_pref(user_text)
-            _record_date_parse(
-                stats,
-                user_text,
-                parsed_date,
-                time_pref,
-                source="current_turn" if parsed_date else "fallback",
-            )
-            if parsed_date:
+            date_parse = parse_voice_date(user_text)
+            _record_voice_date_parse(stats, user_text, date_parse, source=_date_source_for(date_parse))
+            if date_parse.target_date:
                 appointment = _selected_appointment(CallSid, action="reschedule")
                 if appointment:
                     stats["branch"] = "reschedule_date_ok"
                     return _offer_reschedule_slots(
                         CallSid,
                         appointment.get("service_type") or "sesion de fisioterapia",
-                        parsed_date,
-                        time_pref,
+                        date_parse.target_date,
+                        date_parse.time_pref,
                         stats,
                     )
+            if date_parse.validation_result == "mismatch":
+                CTX.set_date(CallSid, None)
+                CTX.set_time_pref(CallSid, None)
+                stats["branch"] = "reschedule_date_weekday_mismatch"
+                stats["stage_after"] = "awaiting_reschedule_date"
+                return _respond_gather(CallSid, _date_clarification(date_parse), stats)
             stats["branch"] = "reschedule_retry"
             stats["stage_after"] = "awaiting_reschedule_date"
             return _respond_gather(CallSid, copy.ask_date_retry(), stats)
@@ -929,9 +964,11 @@ async def agent_entry(
             parse_start = time.perf_counter()
             route_peek = route
             service = detect_service(user_text)
-            parsed_date = parse_spanish_day(user_text)
-            time_pref = parse_time_pref(user_text)
+            date_parse = parse_voice_date(user_text)
+            parsed_date = date_parse.target_date
+            time_pref = date_parse.time_pref
             stats["intent_ms"] += (time.perf_counter() - parse_start) * 1000
+            _record_voice_date_parse(stats, user_text, date_parse, source=_date_source_for(date_parse))
 
             if route_peek["type"] in {"faq", "human_handoff", "uncertain"}:
                 natural = await maybe_handle_natural_turn(CallSid, user_text, page_size=VOICE_PAGE_SIZE)
@@ -962,6 +999,13 @@ async def agent_entry(
             if not service and _looks_like_lavado_only(user_text):
                 service = "corte + lavado"
                 stats["branch"] = "lavado_heuristic"
+
+            if service and date_parse.validation_result == "mismatch":
+                CTX.set_service(CallSid, service)
+                CTX.set_stage(CallSid, "awaiting_date")
+                stats["branch"] = "service_date_weekday_mismatch"
+                stats["stage_after"] = "awaiting_date"
+                return _respond_gather(CallSid, _date_clarification(date_parse), stats)
 
             if service and parsed_date:
                 CTX.set_service(CallSid, service)
@@ -1058,17 +1102,12 @@ async def agent_entry(
 
         if current_stage == "awaiting_date":
             parse_start = time.perf_counter()
-            parsed_date = parse_spanish_day(user_text)
-            time_pref = parse_time_pref(user_text)
+            date_parse = parse_voice_date(user_text)
+            parsed_date = date_parse.target_date
+            time_pref = date_parse.time_pref
             route_peek = route
             stats["intent_ms"] += (time.perf_counter() - parse_start) * 1000
-            _record_date_parse(
-                stats,
-                user_text,
-                parsed_date,
-                time_pref,
-                source="current_turn" if parsed_date else "fallback",
-            )
+            _record_voice_date_parse(stats, user_text, date_parse, source=_date_source_for(date_parse))
 
             if parsed_date:
                 ctx = CTX.get(CallSid) or {}
@@ -1088,6 +1127,13 @@ async def agent_entry(
 
                 stats["branch"] = "date_ok"
                 return _offer_slots(CallSid, service, parsed_date, time_pref, stats)
+
+            if date_parse.validation_result == "mismatch":
+                CTX.set_date(CallSid, None)
+                CTX.set_time_pref(CallSid, None)
+                stats["branch"] = "date_weekday_mismatch"
+                stats["stage_after"] = "awaiting_date"
+                return _respond_gather(CallSid, _date_clarification(date_parse), stats)
 
             if time_pref:
                 CTX.set_time_pref(CallSid, time_pref)
@@ -1109,13 +1155,15 @@ async def agent_entry(
         if current_stage == "offering_slots":
             parse_start = time.perf_counter()
             current = _current_slots(CallSid)
-            selected = pick_slot(user_text, current)
-            reparsed_date = parse_spanish_day(user_text)
-            reparsed_time = parse_time_pref(user_text)
+            picked = pick_slot_with_index(user_text, current)
+            selected = picked[1] if picked else None
+            date_parse = parse_voice_date(user_text)
+            reparsed_date = date_parse.target_date
+            reparsed_time = date_parse.time_pref
             route_peek = route
             stats["intent_ms"] += (time.perf_counter() - parse_start) * 1000
-            if reparsed_date:
-                _record_date_parse(stats, user_text, reparsed_date, reparsed_time, source="current_turn")
+            if date_parse.target_date or date_parse.explicit_weekday is not None or date_parse.time_pref:
+                _record_voice_date_parse(stats, user_text, date_parse, source=_date_source_for(date_parse))
 
             if selected:
                 ctx = CTX.get(CallSid) or {}
@@ -1123,9 +1171,18 @@ async def agent_entry(
                 selected_dt = parse_slot_label(selected)
                 CTX.set_pending_slot(CallSid, selected)
                 CTX.set_stage(CallSid, "awaiting_contact")
+                _record_slot_selection(stats, user_text, picked[0], selected)
                 stats["branch"] = "slot_selected_ask_contact"
                 stats["stage_after"] = "awaiting_contact"
                 return _respond_gather(CallSid, _contact_prompt_for_call(CallSid, From), stats)
+
+            if date_parse.validation_result == "mismatch":
+                CTX.set_date(CallSid, None)
+                CTX.set_time_pref(CallSid, None)
+                CTX.set_stage(CallSid, "awaiting_date")
+                stats["branch"] = "slot_date_weekday_mismatch"
+                stats["stage_after"] = "awaiting_date"
+                return _respond_gather(CallSid, _date_clarification(date_parse), stats)
 
             if reparsed_date:
                 ctx = CTX.get(CallSid) or {}
@@ -1195,6 +1252,10 @@ async def agent_entry(
             phone, email = extract_contact(user_text)
             if not phone and not email and confirms_current_phone(user_text) and ctx.get("suggested_contact_phone"):
                 phone = ctx.get("suggested_contact_phone")
+            if not phone and not email and requests_email_contact(user_text):
+                stats["branch"] = "contact_email_requested"
+                stats["stage_after"] = "awaiting_contact"
+                return _respond_gather(CallSid, copy.ask_contact_email(), stats)
             if not phone and not email:
                 stats["branch"] = "contact_retry"
                 stats["stage_after"] = "awaiting_contact"

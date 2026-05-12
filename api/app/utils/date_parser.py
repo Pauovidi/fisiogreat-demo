@@ -1,6 +1,7 @@
 import datetime as dt
 import re
 import unicodedata
+from dataclasses import dataclass
 from typing import Literal, Optional
 from zoneinfo import ZoneInfo
 
@@ -16,6 +17,15 @@ WEEKDAYS = {
     "savao": 5,
     "domingo": 6,
 }
+
+
+@dataclass(frozen=True)
+class VoiceDateParse:
+    target_date: Optional[dt.date]
+    raw_target_date: Optional[dt.date]
+    time_pref: Optional[Literal["morning", "afternoon"]]
+    explicit_weekday: Optional[int]
+    validation_result: Literal["ok", "mismatch", "ambiguous"]
 
 
 def _normalize(text: str) -> str:
@@ -44,6 +54,51 @@ def parse_spanish_day(text: str, tz: str = "Europe/Madrid", *, today: Optional[d
             return today + dt.timedelta(days=days_ahead)
 
     return None
+
+
+def extract_explicit_weekday(text: str) -> Optional[int]:
+    normalized = _normalize(text)
+    for day_name, weekday in WEEKDAYS.items():
+        if re.search(rf"\b{day_name}\b", normalized):
+            return weekday
+    return None
+
+
+def parse_voice_date(
+    text: str,
+    tz: str = "Europe/Madrid",
+    *,
+    today: Optional[dt.date] = None,
+) -> VoiceDateParse:
+    raw_target_date = parse_spanish_day(text, tz, today=today)
+    explicit_weekday = extract_explicit_weekday(text)
+    time_pref = parse_time_pref(text)
+
+    if raw_target_date and explicit_weekday is not None and raw_target_date.weekday() != explicit_weekday:
+        return VoiceDateParse(
+            target_date=None,
+            raw_target_date=raw_target_date,
+            time_pref=time_pref,
+            explicit_weekday=explicit_weekday,
+            validation_result="mismatch",
+        )
+
+    if raw_target_date:
+        return VoiceDateParse(
+            target_date=raw_target_date,
+            raw_target_date=raw_target_date,
+            time_pref=time_pref,
+            explicit_weekday=explicit_weekday,
+            validation_result="ok",
+        )
+
+    return VoiceDateParse(
+        target_date=None,
+        raw_target_date=None,
+        time_pref=time_pref,
+        explicit_weekday=explicit_weekday,
+        validation_result="ambiguous",
+    )
 
 
 def _today(tz: str) -> dt.date:

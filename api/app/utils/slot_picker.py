@@ -1,6 +1,6 @@
 import re
 import unicodedata
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 
 def _normalize(text: str) -> str:
@@ -11,13 +11,18 @@ def _normalize(text: str) -> str:
 
 
 def pick_slot(text: str, offered_slots: List[str]) -> Optional[str]:
+    picked = pick_slot_with_index(text, offered_slots)
+    return picked[1] if picked else None
+
+
+def pick_slot_with_index(text: str, offered_slots: List[str]) -> Optional[Tuple[int, str]]:
     if not offered_slots:
         return None
 
     normalized = _normalize(text)
     selected_index = _pick_slot_index(normalized, len(offered_slots))
     if selected_index is not None:
-        return offered_slots[selected_index]
+        return selected_index, offered_slots[selected_index]
 
     time_match = re.search(r"(?:a\s+las\s+)?(\d{1,2})(?::(\d{2}))?", normalized)
     if not time_match:
@@ -27,23 +32,59 @@ def pick_slot(text: str, offered_slots: List[str]) -> Optional[str]:
     minute = time_match.group(2)
     if minute is not None:
         target = f"{hour:02d}:{minute}"
-        for slot in offered_slots:
+        for index, slot in enumerate(offered_slots):
             if target in slot:
-                return slot
+                return index, slot
         return None
 
     hour_prefix = f"{hour:02d}:"
-    for slot in offered_slots:
+    for index, slot in enumerate(offered_slots):
         if hour_prefix in slot:
-            return slot
+            return index, slot
     return None
 
 
 def _pick_slot_index(normalized: str, slot_count: int) -> Optional[int]:
     token_patterns = [
-        (0, [r"\b1\b", r"\bprimera\b", r"\bla primera\b", r"\bopcion primera\b", r"\buno\b", r"\bla uno\b"]),
-        (1, [r"\b2\b", r"\bsegunda\b", r"\bla segunda\b", r"\bopcion segunda\b", r"\bdos\b", r"\bla dos\b"]),
-        (2, [r"\b3\b", r"\btercera\b", r"\bla tercera\b", r"\bopcion tercera\b", r"\btres\b", r"\bla tres\b"]),
+        (
+            0,
+            [
+                r"\b1\b",
+                r"\bprimera\b",
+                r"\bla primera\b",
+                r"\bprimer(?:a)?\s+hueco\b",
+                r"\bopcion primera\b",
+                r"\bopcion uno\b",
+                r"\buno\b",
+                r"\bla uno\b",
+            ],
+        ),
+        (
+            1,
+            [
+                r"\b2\b",
+                r"\bsegunda\b",
+                r"\bla segunda\b",
+                r"\bsegundo\s+hueco\b",
+                r"\bopcion segunda\b",
+                r"\bopcion dos\b",
+                r"\bdos\b",
+                r"\bla dos\b",
+            ],
+        ),
+        (
+            2,
+            [
+                r"\b3\b",
+                r"\btercera\b",
+                r"\bla tercera\b",
+                r"\btercer(?:a)?\s+hueco\b",
+                r"\bopcion tercera\b",
+                r"\bopcion tres\b",
+                r"\btres\b",
+                r"\bla tres\b",
+            ],
+        ),
     ]
 
     for idx, patterns in token_patterns:
