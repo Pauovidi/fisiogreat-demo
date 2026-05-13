@@ -267,6 +267,12 @@ async def confirm_slot(
         end_at=end_at,
     )
     if not lock_ok:
+        logger.info(
+            "booking_confirm_revalidation confirm_slot_revalidation_result=busy reason=double_booking "
+            "proposed_slot_start=%s proposed_slot_end=%s",
+            start_at.isoformat(),
+            end_at.isoformat(),
+        )
         return BookingResult(False, reason="double_booking")
 
     try:
@@ -290,7 +296,25 @@ async def confirm_slot(
             )
             return BookingResult(False, reason="patient_name_required")
 
-        if calendar_service.free_busy(start_at, end_at):
+        try:
+            busy_intervals = calendar_service.free_busy(start_at, end_at)
+        except Exception:
+            logger.warning(
+                "booking_confirm_revalidation confirm_slot_revalidation_result=error "
+                "proposed_slot_start=%s proposed_slot_end=%s",
+                start_at.isoformat(),
+                end_at.isoformat(),
+            )
+            raise
+
+        if busy_intervals:
+            logger.info(
+                "booking_confirm_revalidation confirm_slot_revalidation_result=busy "
+                "busy_intervals_count=%s proposed_slot_start=%s proposed_slot_end=%s",
+                len(busy_intervals),
+                start_at.isoformat(),
+                end_at.isoformat(),
+            )
             await supabase_repo.release_booking_lock(
                 clinic_id=clinic_id,
                 resource_id=resource_id,
@@ -298,6 +322,12 @@ async def confirm_slot(
                 end_at=end_at,
             )
             return BookingResult(False, reason="calendar_busy")
+        logger.info(
+            "booking_confirm_revalidation confirm_slot_revalidation_result=free "
+            "busy_intervals_count=0 proposed_slot_start=%s proposed_slot_end=%s",
+            start_at.isoformat(),
+            end_at.isoformat(),
+        )
 
         event_id = calendar_service.build_deterministic_event_id(
             clinic_id,

@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from app.config.settings import settings
 from app.main import app
 from app.services import conversation_relay
-from app.services.booking_service import confirm_slot
+from app.services.booking_service import BookingResult, confirm_slot
 from app.services.calendar_service import CALENDAR_STORE
 from app.services.supabase_repo import STORE
 from app.utils.mini_context import CTX
@@ -369,6 +369,7 @@ def test_conversationrelay_awaiting_contact_accepts_email_request_then_spoken_em
         drive_conversationrelay_to_contact(websocket, call_sid)
         websocket.send_json({"type": "prompt", "voicePrompt": contact_request, "last": True})
         ask_email = websocket.receive_json()
+        assert CTX.get_stage(call_sid) == "awaiting_contact_email"
         websocket.send_json({
             "type": "prompt",
             "voicePrompt": "mi email es marcos arroba ejemplo punto com",
@@ -377,9 +378,128 @@ def test_conversationrelay_awaiting_contact_accepts_email_request_then_spoken_em
         confirm = websocket.receive_json()
 
     assert "perfecto, dime tu correo electrónico" in ask_email["token"].lower()
+    assert CTX.get_stage(call_sid) == "completed"
     assert "gracias" in confirm["token"].lower()
     appointment = next(iter(STORE.appointments.values()))
     assert appointment["metadata"]["contact_email"] == "marcos@ejemplo.com"
+
+
+@pytest.mark.parametrize(
+    ("spoken", "expected"),
+    [
+        ("marcos arroba fisiobrade punto com", "marcos@fisiobrade.com"),
+        ("marcos arroba uno punto com", "marcos@uno.com"),
+    ],
+)
+def test_conversationrelay_awaiting_contact_accepts_direct_spoken_email(spoken, expected):
+    call_sid = f"CA-conversationrelay-direct-email-{expected.split('@', 1)[1].replace('.', '-')}"
+    reset_state(call_sid)
+
+    with client.websocket_connect("/webhook/voice/conversationrelay/ws") as websocket:
+        drive_conversationrelay_to_contact(websocket, call_sid)
+        websocket.send_json({"type": "prompt", "voicePrompt": spoken, "last": True})
+        confirm = websocket.receive_json()
+
+    assert "gracias" in confirm["token"].lower()
+    appointment = next(iter(STORE.appointments.values()))
+    assert appointment["metadata"]["contact_email"] == expected
+    assert CTX.get_stage(call_sid) == "completed"
+
+
+def test_conversationrelay_awaiting_contact_phone_substage_confirms_with_phone():
+    call_sid = "CA-conversationrelay-phone-method-substage"
+    reset_state(call_sid)
+
+    with client.websocket_connect("/webhook/voice/conversationrelay/ws") as websocket:
+        drive_conversationrelay_to_contact(websocket, call_sid)
+        websocket.send_json({"type": "prompt", "voicePrompt": "un teléfono", "last": True})
+        ask_phone = websocket.receive_json()
+        assert "perfecto, dime el teléfono móvil" in ask_phone["token"].lower()
+        assert CTX.get_stage(call_sid) == "awaiting_contact_phone"
+        websocket.send_json({"type": "prompt", "voicePrompt": "640 50 50 50", "last": True})
+        confirm = websocket.receive_json()
+
+    assert "gracias" in confirm["token"].lower()
+    appointment = next(iter(STORE.appointments.values()))
+    assert appointment["metadata"]["contact_phone"] == "640505050"
+
+
+def test_conversationrelay_awaiting_contact_email_reprompts_email_without_slot_fallback():
+    call_sid = "CA-conversationrelay-email-substage-retry"
+    reset_state(call_sid)
+
+    with client.websocket_connect("/webhook/voice/conversationrelay/ws") as websocket:
+        drive_conversationrelay_to_contact(websocket, call_sid)
+        websocket.send_json({"type": "prompt", "voicePrompt": "un correo", "last": True})
+        websocket.receive_json()
+        websocket.send_json({"type": "prompt", "voicePrompt": "opción dos", "last": True})
+        retry = websocket.receive_json()
+
+    assert "no he entendido bien el correo" in retry["token"].lower()
+    assert CTX.get_stage(call_sid) == "awaiting_contact_email"
+    assert not STORE.appointments
+
+
+def test_conversationrelay_preserves_slot_and_contact_after_busy_reoffer(monkeypatch):
+    call_sid = "CA-conversationrelay-reoffer-preserve-contact"
+    reset_state(call_sid)
+    calls = []
+
+    async def fake_confirm_slot(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            return BookingResult(False, reason="calendar_busy")
+        return BookingResult(True, appointment={"metadata": {"patient_name": kwargs.get("patient_name")}})
+
+    monkeypatch.setattr("app.services.conversation_relay.confirm_slot", fake_confirm_slot)
+    monkeypatch.setattr(
+        "app.services.conversation_relay._build_short_slot_labels",
+        lambda *_args, **_kwargs: [
+            "jueves 14/05 a las 10:15",
+            "jueves 14/05 a las 10:30",
+            "jueves 14/05 a las 10:45",
+        ],
+    )
+
+    CTX.set_service(call_sid, "valoracion inicial")
+    CTX.set_patient_name(call_sid, "Pau Marco", "manual")
+    CTX.set_date(call_sid, dt.date(2026, 5, 14))
+    CTX.set_time_pref(call_sid, "morning")
+    CTX.set_slots(
+        call_sid,
+        [
+            "jueves 14/05 a las 10:00",
+            "jueves 14/05 a las 10:15",
+            "jueves 14/05 a las 10:30",
+        ],
+    )
+    CTX.set_stage(call_sid, "offering_slots")
+    CTX.next_slots(call_sid, 3)
+
+    ask_contact = asyncio.run(conversation_relay._handle_user_input(call_sid, "la primera"))
+    selected = CTX.get(call_sid)["selected_slot"]
+    assert "correo electrónico" in ask_contact.lower() or "teléfono" in ask_contact.lower()
+    assert selected["label"] == "jueves 14/05 a las 10:00"
+    assert selected["start_at"] == dt.datetime(2026, 5, 14, 10, 0)
+
+    reoffer = asyncio.run(conversation_relay._handle_user_input(call_sid, "marcos arroba ejemplo punto com"))
+
+    assert "conservo tu contacto" in reoffer.lower()
+    assert CTX.get_stage(call_sid) == "offering_slots"
+    assert CTX.get(call_sid)["contact_email"] == "marcos@ejemplo.com"
+    assert CTX.get(call_sid)["offered_slots"] == [
+        "jueves 14/05 a las 10:15",
+        "jueves 14/05 a las 10:30",
+        "jueves 14/05 a las 10:45",
+    ]
+
+    confirmed = asyncio.run(conversation_relay._handle_user_input(call_sid, "opción dos"))
+
+    assert "gracias" in confirmed.lower()
+    assert len(calls) == 2
+    assert calls[1]["contact_email"] == "marcos@ejemplo.com"
+    assert calls[1]["start_at"] == dt.datetime(2026, 5, 14, 10, 30)
+    assert CTX.get_stage(call_sid) == "completed"
 
 
 def test_conversationrelay_contact_retry_copy_is_helpful_and_not_duplicated():

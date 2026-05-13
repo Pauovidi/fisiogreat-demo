@@ -107,6 +107,18 @@ class VoiceCopy:
         return "Perfecto, dime tu correo electrónico. Puedes decirlo como marcos arroba ejemplo punto com."
 
     @staticmethod
+    def ask_contact_email_retry() -> str:
+        return "Perdona, no he entendido bien el correo. Puedes decirlo como marcos arroba ejemplo punto com."
+
+    @staticmethod
+    def ask_contact_phone() -> str:
+        return "Perfecto, dime el teléfono móvil."
+
+    @staticmethod
+    def ask_contact_phone_retry() -> str:
+        return "Perdona, no he entendido bien el teléfono. Dime solo un teléfono móvil, por ejemplo 640 50 50 50."
+
+    @staticmethod
     def ask_contact_retry(attempt: int = 1) -> str:
         if attempt <= 1:
             return (

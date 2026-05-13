@@ -46,6 +46,7 @@ def test_voice_contact_prompt_is_complete():
     assert not text.rstrip(" ?").endswith(("un", "o un", "un email", "email"))
     assert "un email" not in text
     assert "un..." not in text
+    assert " o un " not in text.lower()
 
 
 def test_voice_copy_uses_human_accents_for_speech():

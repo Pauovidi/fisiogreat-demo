@@ -21,6 +21,7 @@ class MiniContext:
             "contact_channel_preference": None,
             "suggested_contact_phone": None,
             "pending_slot": None,
+            "selected_slot": None,
             "pending_reschedule_appointments": [],
             "pending_cancel_appointments": [],
             "selected_appointment_id": None,
@@ -105,6 +106,10 @@ class MiniContext:
     def set_pending_slot(self, key: str, slot: Optional[str]):
         entry = self._touch(key)
         entry["pending_slot"] = slot
+
+    def set_selected_slot(self, key: str, selected_slot: Optional[Dict[str, Any]]):
+        entry = self._touch(key)
+        entry["selected_slot"] = dict(selected_slot) if selected_slot else None
 
     def set_pending_appointments(self, key: str, *, action: str, appointments: List[Dict[str, Any]]):
         entry = self._touch(key)

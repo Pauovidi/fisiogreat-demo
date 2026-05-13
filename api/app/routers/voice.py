@@ -36,8 +36,11 @@ from ..utils.booking_requirements import (
     clean_consultation_reason,
     confirms_current_phone,
     extract_contact,
+    extract_email,
+    extract_phone,
     is_physiotherapy_session,
     requests_email_contact,
+    requests_phone_contact,
 )
 from ..utils.confirmation import (
     cancel_selection_implies_confirmation,
@@ -63,7 +66,9 @@ VOICE_PAGE_SIZE = 3
 VOICE_HINTS = (
     "fisioterapia, fisio, primera visita, valoracion inicial, valoracion, seguimiento, sesion, "
     "lunes, martes, miércoles, miercoles, jueves, viernes, sábado, sabado, domingo, "
-    "mañana, manana, pasado mañana, pasado manana, tarde, primera, segunda, tercera, uno, dos, tres"
+    "mañana, manana, pasado mañana, pasado manana, tarde, primera, segunda, tercera, uno, dos, tres, "
+    "correo, correo electrónico, email, arroba, punto, gmail, hotmail, outlook, com, es, "
+    "teléfono, telefono, móvil, movil, número, numero, más, mas, seis, siete, ocho, nueve, cero"
 )
 WEEKDAY_LABELS = [
     "lunes",
@@ -366,6 +371,16 @@ def _log_turn(call_sid: str, stats: Dict[str, Any]):
         "slot_selection_raw": mask_sensitive_text(stats.get("slot_selection_raw", "")),
         "selected_slot_index": stats.get("selected_slot_index"),
         "selected_slot_label": stats.get("selected_slot_label"),
+        "selected_slot_start": stats.get("selected_slot_start"),
+        "selected_slot_end": stats.get("selected_slot_end"),
+        "selected_slot_preserved": stats.get("selected_slot_preserved"),
+        "contact_stage": stats.get("contact_stage"),
+        "contact_parse_result": stats.get("contact_parse_result"),
+        "contact_present_before_confirm": stats.get("contact_present_before_confirm"),
+        "confirm_slot_revalidation_result": stats.get("confirm_slot_revalidation_result"),
+        "reoffer_due_to_slot_taken": stats.get("reoffer_due_to_slot_taken"),
+        "contact_preserved_after_reoffer": stats.get("contact_preserved_after_reoffer"),
+        "selected_slot_after_reoffer": stats.get("selected_slot_after_reoffer"),
     }
     logger.info(
         "voice_turn "
@@ -440,6 +455,89 @@ def _record_slot_selection(stats: Dict[str, Any], raw: str, selected_index: int,
     stats["slot_selection_raw"] = raw
     stats["selected_slot_index"] = selected_index + 1
     stats["selected_slot_label"] = selected_label
+
+
+def _selected_slot_payload(label: str, service: str) -> Optional[Dict[str, Any]]:
+    start_at = parse_slot_label(label or "")
+    if not start_at:
+        return None
+    end_at = start_at + dt.timedelta(minutes=service_duration_minutes(service))
+    return {
+        "start_at": start_at,
+        "end_at": end_at,
+        "label": label,
+        "original_label": label,
+        "service_type": service,
+        "date": start_at.date(),
+    }
+
+
+def _store_selected_slot(
+    call_sid: str,
+    label: str,
+    service: str,
+    *,
+    stats: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    payload = _selected_slot_payload(label, service)
+    if not payload:
+        return None
+    CTX.set_pending_slot(call_sid, label)
+    CTX.set_selected_slot(call_sid, payload)
+    if stats is not None:
+        stats["selected_slot_start"] = payload["start_at"].isoformat()
+        stats["selected_slot_end"] = payload["end_at"].isoformat()
+        stats["selected_slot_label"] = label
+        stats["selected_slot_preserved"] = True
+    return payload
+
+
+def _selected_slot_details(call_sid: str) -> Optional[Dict[str, Any]]:
+    ctx = CTX.get(call_sid) or {}
+    stored = ctx.get("selected_slot") or {}
+    label = stored.get("label") or ctx.get("pending_slot")
+    service = stored.get("service_type") or ctx.get("service") or "sesion de fisioterapia"
+    start_at = stored.get("start_at")
+    if not isinstance(start_at, dt.datetime):
+        start_at = _parse_start(start_at)
+    if not start_at and label:
+        start_at = parse_slot_label(label)
+    if not start_at or not label:
+        return None
+    end_at = stored.get("end_at")
+    if not isinstance(end_at, dt.datetime):
+        end_at = _parse_start(end_at)
+    if not end_at:
+        end_at = start_at + dt.timedelta(minutes=service_duration_minutes(service))
+    return {
+        "start_at": start_at,
+        "end_at": end_at,
+        "label": label,
+        "original_label": stored.get("original_label") or label,
+        "service_type": service,
+        "date": stored.get("date") or start_at.date(),
+    }
+
+
+def _contact_present(ctx: Dict[str, Any]) -> bool:
+    return bool(ctx.get("contact_phone") or ctx.get("contact_email"))
+
+
+def _clear_selected_slot(call_sid: str) -> None:
+    CTX.set_pending_slot(call_sid, None)
+    CTX.set_selected_slot(call_sid, None)
+
+
+def _contact_email_retry_prompt(call_sid: str) -> str:
+    ctx = CTX.get(call_sid) or {}
+    ctx["contact_parse_failures"] = int(ctx.get("contact_parse_failures") or 0) + 1
+    return copy.ask_contact_email_retry()
+
+
+def _contact_phone_retry_prompt(call_sid: str) -> str:
+    ctx = CTX.get(call_sid) or {}
+    ctx["contact_parse_failures"] = int(ctx.get("contact_parse_failures") or 0) + 1
+    return copy.ask_contact_phone_retry()
 
 
 def _parse_start(value: Any) -> Optional[dt.datetime]:
@@ -568,6 +666,10 @@ def _reprompt_for_stage(call_sid: str) -> str:
         return copy.ask_consultation_reason_retry()
     if stage == "awaiting_contact":
         return _contact_retry_prompt(call_sid)
+    if stage == "awaiting_contact_email":
+        return copy.ask_contact_email()
+    if stage == "awaiting_contact_phone":
+        return copy.ask_contact_phone()
     if stage == "awaiting_date":
         return copy.ask_date(ctx.get("service"))
     if stage == "offering_slots":
@@ -587,6 +689,7 @@ def _offer_slots(call_sid: str, service: str, parsed_date: dt.date, time_pref: O
     slot_start = time.perf_counter()
     CTX.set_date(call_sid, parsed_date)
     CTX.set_time_pref(call_sid, time_pref)
+    _clear_selected_slot(call_sid)
     CTX.set_slots(call_sid, _build_slot_labels(service, parsed_date, time_pref))
     CTX.set_stage(call_sid, "offering_slots")
     stats["slot_ms"] += (time.perf_counter() - slot_start) * 1000
@@ -632,6 +735,185 @@ def _contact_retry_prompt(key: str) -> str:
     attempts = int(ctx.get("contact_parse_failures") or 0) + 1
     ctx["contact_parse_failures"] = attempts
     return copy.ask_contact_retry(attempts)
+
+
+def _set_contact_from_parse(
+    call_sid: str,
+    *,
+    phone: Optional[str] = None,
+    email: Optional[str] = None,
+    stats: Optional[Dict[str, Any]] = None,
+) -> None:
+    CTX.set_contact(
+        call_sid,
+        contact_phone=phone,
+        contact_email=email,
+        contact_channel_preference="phone" if phone else "email",
+    )
+    ctx = CTX.get(call_sid) or {}
+    ctx["contact_parse_failures"] = 0
+    if stats is not None:
+        stats["contact_present"] = True
+        stats["contact_parse_result"] = "accepted"
+
+
+def _reoffer_after_slot_taken(
+    call_sid: str,
+    details: Dict[str, Any],
+    stats: Dict[str, Any],
+) -> Response:
+    ctx = CTX.get(call_sid) or {}
+    service = details.get("service_type") or ctx.get("service") or "sesion de fisioterapia"
+    date_pref = details.get("date") or ctx.get("date_pref")
+    time_pref = ctx.get("time_pref")
+    stats["reoffer_due_to_slot_taken"] = True
+    stats["contact_preserved_after_reoffer"] = _contact_present(ctx)
+    _clear_selected_slot(call_sid)
+    if not isinstance(date_pref, dt.date):
+        CTX.set_stage(call_sid, "awaiting_date")
+        stats["stage_after"] = "awaiting_date"
+        return _respond_gather(
+            call_sid,
+            "Ese hueco acaba de ocuparse. Conservo tu contacto. ¿Qué día te va bien?",
+            stats,
+        )
+    CTX.set_slots(
+        call_sid,
+        _build_slot_labels(
+            service,
+            date_pref,
+            time_pref,
+            original_start_at=details.get("start_at"),
+        ),
+    )
+    CTX.set_stage(call_sid, "offering_slots")
+    visible_slots = CTX.next_slots(call_sid, VOICE_PAGE_SIZE)
+    stats["stage_after"] = "offering_slots"
+    stats["selected_slot_after_reoffer"] = visible_slots[0] if visible_slots else None
+    prefix = "Ese hueco acaba de ocuparse. Conservo tu contacto y te doy otras opciones para el mismo día."
+    if not visible_slots:
+        return _respond_gather(call_sid, f"{prefix} {copy.no_slots_for_day(date_pref, time_pref=time_pref)}", stats)
+    return _respond_gather(call_sid, f"{prefix} {copy.propose_slots(visible_slots, time_pref=time_pref)}", stats)
+
+
+async def _confirm_selected_slot_with_contact(
+    call_sid: str,
+    stats: Dict[str, Any],
+    *,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> Response:
+    ctx = CTX.get(call_sid) or {}
+    details = _selected_slot_details(call_sid)
+    service = (details or {}).get("service_type") or ctx.get("service") or "sesion de fisioterapia"
+    if not details:
+        CTX.set_stage(call_sid, "awaiting_date")
+        stats["branch"] = "contact_missing_selected_slot"
+        stats["stage_after"] = "awaiting_date"
+        stats["selected_slot_preserved"] = False
+        return _respond_gather(call_sid, copy.ask_date(service), stats)
+
+    stats["selected_slot_start"] = details["start_at"].isoformat()
+    stats["selected_slot_end"] = details["end_at"].isoformat()
+    stats["selected_slot_label"] = details["label"]
+    stats["selected_slot_preserved"] = True
+    stats["contact_present_before_confirm"] = _contact_present(ctx)
+
+    booking_result = await confirm_slot(
+        channel="voice",
+        external_user_id=call_sid,
+        service_type=service,
+        start_at=details["start_at"],
+        end_at=details["end_at"],
+        patient_name=ctx.get("patient_name"),
+        consultation_reason=ctx.get("consultation_reason"),
+        contact_phone=ctx.get("contact_phone"),
+        contact_email=ctx.get("contact_email"),
+        metadata={"slot_label": details["label"], **(metadata or {})},
+    )
+    if not booking_result.ok:
+        stats["branch"] = f"slot_confirm_failed_{booking_result.reason}"
+        if booking_result.reason == "missing_contact":
+            CTX.set_stage(call_sid, "awaiting_contact")
+            stats["stage_after"] = "awaiting_contact"
+            stats["confirm_slot_revalidation_result"] = "missing_contact"
+            return _respond_gather(call_sid, _contact_retry_prompt(call_sid), stats)
+        if booking_result.reason in {"calendar_busy", "double_booking"}:
+            stats["confirm_slot_revalidation_result"] = "busy"
+            return _reoffer_after_slot_taken(call_sid, details, stats)
+        stats["confirm_slot_revalidation_result"] = "error"
+        stats["stage_after"] = CTX.get_stage(call_sid)
+        return _respond_gather(call_sid, "No he podido confirmar la cita ahora mismo. Tu cita no se ha cerrado.", stats)
+
+    appointment = booking_result.appointment
+    patient_name = (appointment or {}).get("metadata", {}).get("patient_name") or ctx.get("patient_name")
+    CTX.clear_flow(call_sid)
+    CTX.set_last_confirmed_slot(call_sid, details["label"], service=service, patient_name=patient_name)
+    CTX.set_stage(call_sid, "completed")
+    stats["branch"] = "contact_then_slot_confirmed"
+    stats["stage_after"] = "completed"
+    stats["confirm_slot_revalidation_result"] = "free"
+    return _respond_gather(call_sid, copy.confirm_booking(details["label"], service, patient_name), stats)
+
+
+async def _handle_contact_stage(
+    call_sid: str,
+    user_text: str,
+    from_value: Optional[str],
+    stats: Dict[str, Any],
+) -> Response:
+    current_stage = CTX.get_stage(call_sid)
+    ctx = CTX.get(call_sid) or {}
+    stats["contact_stage"] = current_stage
+
+    if current_stage == "awaiting_contact_email":
+        email = extract_email(user_text)
+        if email:
+            _set_contact_from_parse(call_sid, email=email, stats=stats)
+            stats["branch"] = "contact_email_then_confirm"
+            return await _confirm_selected_slot_with_contact(call_sid, stats)
+        stats["contact_parse_result"] = "rejected"
+        stats["branch"] = "contact_email_retry"
+        stats["stage_after"] = "awaiting_contact_email"
+        return _respond_gather(call_sid, _contact_email_retry_prompt(call_sid), stats)
+
+    if current_stage == "awaiting_contact_phone":
+        phone = extract_phone(user_text)
+        if phone:
+            _set_contact_from_parse(call_sid, phone=phone, stats=stats)
+            stats["branch"] = "contact_phone_then_confirm"
+            return await _confirm_selected_slot_with_contact(call_sid, stats)
+        stats["contact_parse_result"] = "rejected"
+        stats["branch"] = "contact_phone_retry"
+        stats["stage_after"] = "awaiting_contact_phone"
+        return _respond_gather(call_sid, _contact_phone_retry_prompt(call_sid), stats)
+
+    phone, email = extract_contact(user_text)
+    if not phone and not email and confirms_current_phone(user_text):
+        if ctx.get("suggested_contact_phone"):
+            phone = ctx.get("suggested_contact_phone")
+        else:
+            phone, _ = extract_contact(from_value or "")
+    if phone or email:
+        _set_contact_from_parse(call_sid, phone=phone, email=email, stats=stats)
+        stats["branch"] = "contact_direct_then_confirm"
+        return await _confirm_selected_slot_with_contact(call_sid, stats)
+    if requests_email_contact(user_text):
+        CTX.set_stage(call_sid, "awaiting_contact_email")
+        stats["contact_parse_result"] = "method_only"
+        stats["branch"] = "contact_email_requested"
+        stats["stage_after"] = "awaiting_contact_email"
+        return _respond_gather(call_sid, copy.ask_contact_email(), stats)
+    if requests_phone_contact(user_text):
+        CTX.set_stage(call_sid, "awaiting_contact_phone")
+        stats["contact_parse_result"] = "method_only"
+        stats["branch"] = "contact_phone_requested"
+        stats["stage_after"] = "awaiting_contact_phone"
+        return _respond_gather(call_sid, copy.ask_contact_phone(), stats)
+
+    stats["contact_parse_result"] = "rejected"
+    stats["branch"] = "contact_retry"
+    stats["stage_after"] = "awaiting_contact"
+    return _respond_gather(call_sid, _contact_retry_prompt(call_sid), stats)
 
 
 def _absolute_url(path: str) -> str:
@@ -823,9 +1105,9 @@ async def agent_entry(
         route = route_message(user_text)
         stats["intent_detected"] = route["type"]
 
-        if current_stage == "awaiting_contact" and route["type"] in {"thanks", "farewell"}:
+        if current_stage in {"awaiting_contact", "awaiting_contact_email", "awaiting_contact_phone"} and route["type"] in {"thanks", "farewell"}:
             stats["branch"] = "contact_required_before_close"
-            stats["stage_after"] = "awaiting_contact"
+            stats["stage_after"] = current_stage
             return _respond_gather(CallSid, copy.contact_required_before_closing(), stats)
 
         if route["type"] == "thanks":
@@ -1170,12 +1452,16 @@ async def agent_entry(
                 ctx = CTX.get(CallSid) or {}
                 service = ctx.get("service") or "sesion de fisioterapia"
                 selected_dt = parse_slot_label(selected)
-                CTX.set_pending_slot(CallSid, selected)
-                CTX.set_stage(CallSid, "awaiting_contact")
-                _record_slot_selection(stats, user_text, picked[0], selected)
-                stats["branch"] = "slot_selected_ask_contact"
-                stats["stage_after"] = "awaiting_contact"
-                return _respond_gather(CallSid, _contact_prompt_for_call(CallSid, From), stats)
+                if selected_dt:
+                    _store_selected_slot(CallSid, selected, service, stats=stats)
+                    _record_slot_selection(stats, user_text, picked[0], selected)
+                    if _contact_present(CTX.get(CallSid) or {}):
+                        stats["branch"] = "slot_selected_contact_present"
+                        return await _confirm_selected_slot_with_contact(CallSid, stats)
+                    CTX.set_stage(CallSid, "awaiting_contact")
+                    stats["branch"] = "slot_selected_ask_contact"
+                    stats["stage_after"] = "awaiting_contact"
+                    return _respond_gather(CallSid, _contact_prompt_for_call(CallSid, From), stats)
 
             if date_parse.validation_result == "mismatch":
                 CTX.set_date(CallSid, None)
@@ -1248,65 +1534,8 @@ async def agent_entry(
             ctx = CTX.get(CallSid) or {}
             return _respond_gather(CallSid, copy.propose_slots(current, time_pref=ctx.get("time_pref")), stats)
 
-        if current_stage == "awaiting_contact":
-            ctx = CTX.get(CallSid) or {}
-            phone, email = extract_contact(user_text)
-            if not phone and not email and confirms_current_phone(user_text) and ctx.get("suggested_contact_phone"):
-                phone = ctx.get("suggested_contact_phone")
-            if not phone and not email and requests_email_contact(user_text):
-                stats["branch"] = "contact_email_requested"
-                stats["stage_after"] = "awaiting_contact"
-                return _respond_gather(CallSid, copy.ask_contact_email(), stats)
-            if not phone and not email:
-                stats["branch"] = "contact_retry"
-                stats["stage_after"] = "awaiting_contact"
-                return _respond_gather(CallSid, _contact_retry_prompt(CallSid), stats)
-            stats["contact_present"] = True
-            ctx["contact_parse_failures"] = 0
-            CTX.set_contact(
-                CallSid,
-                contact_phone=phone,
-                contact_email=email,
-                contact_channel_preference="phone" if phone else "email",
-            )
-            ctx = CTX.get(CallSid) or {}
-            selected = ctx.get("pending_slot")
-            service = ctx.get("service") or "sesion de fisioterapia"
-            selected_dt = parse_slot_label(selected or "")
-            if selected_dt:
-                booking_result = await confirm_slot(
-                    channel="voice",
-                    external_user_id=CallSid,
-                    service_type=service,
-                    start_at=selected_dt,
-                    patient_name=ctx.get("patient_name"),
-                    consultation_reason=ctx.get("consultation_reason"),
-                    contact_phone=ctx.get("contact_phone"),
-                    contact_email=ctx.get("contact_email"),
-                    metadata={"slot_label": selected},
-                )
-                if not booking_result.ok:
-                    stats["branch"] = f"slot_confirm_failed_{booking_result.reason}"
-                    if booking_result.reason == "missing_contact":
-                        stats["stage_after"] = "awaiting_contact"
-                        return _respond_gather(CallSid, _contact_retry_prompt(CallSid), stats)
-                    return _respond_gather(
-                        CallSid,
-                        "Ese hueco acaba de ocuparse. Te digo otras opciones.",
-                        stats,
-                    )
-                appointment = booking_result.appointment
-                patient_name = (appointment or {}).get("metadata", {}).get("patient_name") or ctx.get("patient_name")
-                CTX.clear_flow(CallSid)
-                CTX.set_last_confirmed_slot(CallSid, selected, service=service, patient_name=patient_name)
-                stats["branch"] = "contact_then_slot_confirmed"
-                CTX.set_stage(CallSid, "completed")
-                stats["stage_after"] = "completed"
-                return _respond_gather(CallSid, copy.confirm_booking(selected, service, patient_name), stats)
-            stats["branch"] = "contact_missing_pending_slot"
-            stats["stage_after"] = "awaiting_date"
-            CTX.set_stage(CallSid, "awaiting_date")
-            return _respond_gather(CallSid, copy.ask_date(service), stats)
+        if current_stage in {"awaiting_contact", "awaiting_contact_email", "awaiting_contact_phone"}:
+            return await _handle_contact_stage(CallSid, user_text, From, stats)
 
         parse_start = time.perf_counter()
         stats["intent_ms"] += (time.perf_counter() - parse_start) * 1000
