@@ -21,12 +21,18 @@ FISIO_SERVICE_DURATIONS = {
     "consulta de seguimiento": 30,
 }
 
+BUSY_CONFIRM_REASONS = {"calendar_busy", "double_booking", "booking_lock_conflict", "slot_busy"}
+
 
 @dataclass(frozen=True)
 class BookingResult:
     ok: bool
     appointment: Optional[Dict[str, Any]] = None
     reason: Optional[str] = None
+
+
+def is_busy_booking_reason(reason: Optional[str]) -> bool:
+    return reason in BUSY_CONFIRM_REASONS
 
 
 def start_booking(*, channel: str, external_user_id: str, service_type: Optional[str] = None) -> Dict[str, Any]:
@@ -67,12 +73,17 @@ def propose_slots(
             window_end=preferred,
             freebusy_calls_count=0,
             latency_ms=0.0,
-            busy_intervals_count=0,
+            calendar_busy_intervals_count=0,
+            internal_busy_intervals_count=0,
+            appointment_busy_count=0,
+            booking_locks_busy_count=0,
             skipped_busy_count=0,
+            skipped_internal_busy_count=0,
             skipped_original_slot_count=0,
         )
         return []
     search_window_start, search_window_end = search_window
+    resource_id = settings.GOOGLE_CALENDAR_ID or "demo-calendar"
     freebusy_started = time.perf_counter()
     busy_intervals = (
         calendar_service.free_busy(search_window_start, search_window_end, ignore_event_id=ignore_calendar_event_id)
@@ -80,6 +91,14 @@ def propose_slots(
         else calendar_service.free_busy(search_window_start, search_window_end)
     )
     freebusy_latency_ms = (time.perf_counter() - freebusy_started) * 1000
+    internal_busy = supabase_repo.list_internal_busy_intervals(
+        clinic_id=settings.DEMO_CLINIC_ID,
+        resource_id=resource_id,
+        start_at=search_window_start,
+        end_at=search_window_end,
+        ignore_calendar_event_id=ignore_calendar_event_id,
+    )
+    internal_busy_intervals = internal_busy["intervals"]
     candidates = _candidate_slots_for_window(
         search_window_start,
         search_window_end,
@@ -90,11 +109,15 @@ def propose_slots(
     )
     slots: List[Dict[str, Any]] = []
     skipped_busy_count = 0
+    skipped_internal_busy_count = 0
     for candidate in candidates:
         start_at = candidate["start"]
         end_at = start_at + dt.timedelta(minutes=duration)
         if _candidate_overlaps_busy(start_at, end_at, busy_intervals):
             skipped_busy_count += 1
+            continue
+        if _candidate_overlaps_busy(start_at, end_at, internal_busy_intervals):
+            skipped_internal_busy_count += 1
             continue
         slots.append({"start": start_at, "end": end_at, "service": service_type})
         if len(slots) >= count:
@@ -108,7 +131,11 @@ def propose_slots(
         1,
         freebusy_latency_ms,
         len(busy_intervals),
+        len(internal_busy_intervals),
+        internal_busy["appointment_busy_count"],
+        internal_busy["booking_locks_busy_count"],
         skipped_busy_count,
+        skipped_internal_busy_count,
         0,
     )
     return slots
@@ -195,15 +222,22 @@ def _log_slot_search(
     window_end: dt.datetime,
     freebusy_calls_count: int,
     latency_ms: float,
-    busy_intervals_count: int,
+    calendar_busy_intervals_count: int,
+    internal_busy_intervals_count: int,
+    appointment_busy_count: int,
+    booking_locks_busy_count: int,
     skipped_busy_count: int,
+    skipped_internal_busy_count: int,
     skipped_original_slot_count: int,
 ) -> None:
     logger.info(
         "slot_search slot_search_mode=batch_freebusy freebusy_calls_count=%s "
         "slots_requested_count=%s slots_found_count=%s slot_search_date=%s "
         "slot_search_window_start=%s slot_search_window_end=%s slot_search_latency_ms=%.1f "
-        "busy_intervals_count=%s skipped_busy_count=%s skipped_original_slot_count=%s",
+        "calendar_busy_intervals_count=%s internal_busy_intervals_count=%s "
+        "appointment_busy_count=%s booking_locks_busy_count=%s "
+        "busy_intervals_count=%s skipped_busy_count=%s skipped_internal_busy_count=%s "
+        "skipped_original_slot_count=%s",
         freebusy_calls_count,
         count,
         found_count,
@@ -211,8 +245,13 @@ def _log_slot_search(
         window_start.isoformat(),
         window_end.isoformat(),
         latency_ms,
-        busy_intervals_count,
+        calendar_busy_intervals_count,
+        internal_busy_intervals_count,
+        appointment_busy_count,
+        booking_locks_busy_count,
+        calendar_busy_intervals_count + internal_busy_intervals_count,
         skipped_busy_count,
+        skipped_internal_busy_count,
         skipped_original_slot_count,
     )
 
@@ -259,6 +298,25 @@ async def confirm_slot(
         start_at.isoformat(),
         end_at.isoformat(),
     )
+
+    internal_busy = supabase_repo.list_internal_busy_intervals(
+        clinic_id=clinic_id,
+        resource_id=resource_id,
+        start_at=start_at,
+        end_at=end_at,
+    )
+    if internal_busy["intervals"]:
+        logger.info(
+            "booking_confirm_revalidation confirm_slot_revalidation_result=busy reason=double_booking "
+            "internal_busy_intervals_count=%s appointment_busy_count=%s booking_locks_busy_count=%s "
+            "proposed_slot_start=%s proposed_slot_end=%s",
+            len(internal_busy["intervals"]),
+            internal_busy["appointment_busy_count"],
+            internal_busy["booking_locks_busy_count"],
+            start_at.isoformat(),
+            end_at.isoformat(),
+        )
+        return BookingResult(False, reason="double_booking")
 
     lock_ok = await supabase_repo.acquire_booking_lock(
         clinic_id=clinic_id,
@@ -309,7 +367,7 @@ async def confirm_slot(
 
         if busy_intervals:
             logger.info(
-                "booking_confirm_revalidation confirm_slot_revalidation_result=busy "
+                "booking_confirm_revalidation confirm_slot_revalidation_result=busy reason=calendar_busy "
                 "busy_intervals_count=%s proposed_slot_start=%s proposed_slot_end=%s",
                 len(busy_intervals),
                 start_at.isoformat(),
@@ -485,6 +543,15 @@ async def reschedule_appointment(appointment_id: str, *, new_start_at: dt.dateti
         end_at=new_end_at.isoformat(),
         status=appointment.get("status") or "confirmed",
     )
+    old_start = _parse_stored_datetime(appointment.get("start_at"))
+    old_end = _parse_stored_datetime(appointment.get("end_at"))
+    if old_start and old_end:
+        await supabase_repo.release_booking_lock(
+            clinic_id=appointment.get("clinic_id") or settings.DEMO_CLINIC_ID,
+            resource_id=settings.GOOGLE_CALENDAR_ID or "demo-calendar",
+            start_at=old_start,
+            end_at=old_end,
+        )
     return BookingResult(True, appointment=updated)
 
 
@@ -503,6 +570,15 @@ async def cancel_appointment(appointment_id: str) -> BookingResult:
     if not deleted_event:
         return BookingResult(False, reason="calendar_delete_failed")
     updated = await supabase_repo.cancel_appointment(appointment_id)
+    start_at = _parse_stored_datetime(appointment.get("start_at"))
+    end_at = _parse_stored_datetime(appointment.get("end_at"))
+    if start_at and end_at:
+        await supabase_repo.release_booking_lock(
+            clinic_id=appointment.get("clinic_id") or settings.DEMO_CLINIC_ID,
+            resource_id=settings.GOOGLE_CALENDAR_ID or "demo-calendar",
+            start_at=start_at,
+            end_at=end_at,
+        )
     return BookingResult(True, appointment=updated)
 
 
@@ -524,6 +600,17 @@ def parse_slot_label(label: str, *, year: Optional[int] = None) -> Optional[dt.d
         return None
     day, month, hour, minute = map(int, match.groups())
     return dt.datetime(year or dt.date.today().year, month, day, hour, minute)
+
+
+def _parse_stored_datetime(value: Any) -> Optional[dt.datetime]:
+    if isinstance(value, dt.datetime):
+        return value
+    if not value:
+        return None
+    try:
+        return dt.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 def _normalize_service(service_type: str) -> str:

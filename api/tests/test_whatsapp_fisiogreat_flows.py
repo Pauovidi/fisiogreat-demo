@@ -352,6 +352,36 @@ def test_whatsapp_accepts_natural_third_option_text(monkeypatch):
     assert appointment["metadata"]["slot_label"] == offered[2]
 
 
+def test_whatsapp_slot_offer_filters_internal_confirmed_appointment(monkeypatch):
+    user = "+34600000077"
+    reset_state(user)
+    target_date = parse_spanish_day("jueves")
+    blocked_start = dt.datetime.combine(target_date, dt.time(10, 0))
+    monkeypatch.setattr("app.services.booking_service.calendar_service.free_busy", lambda *_args, **_kwargs: [])
+    asyncio.run(supabase_repo.create_appointment(
+        clinic_id=settings.DEMO_CLINIC_ID,
+        patient_id="patient-busy-whatsapp",
+        service_type="valoracion inicial",
+        start_at=blocked_start.isoformat(),
+        end_at=(blocked_start + dt.timedelta(hours=1)).isoformat(),
+        status="confirmed",
+        calendar_event_id="internal-whatsapp-busy",
+        channel="voice",
+        external_user_id="CA-internal-whatsapp",
+        metadata={"patient_name": "Busy Patient"},
+    ))
+
+    post_whatsapp(user, "quiero pedir cita")
+    post_whatsapp(user, "valoracion inicial")
+    post_whatsapp(user, "Pau Marco")
+    post_whatsapp(user, "jueves")
+    offered = CTX.get(user)["offered_slots"]
+
+    assert offered
+    assert f"{slot_day_prefix(target_date)} a las 10:00" not in offered
+    assert offered[0].endswith("a las 11:00")
+
+
 def test_whatsapp_second_option_does_not_confirm_when_calendar_fails(monkeypatch):
     user = "+34600000005"
     reset_state(user)

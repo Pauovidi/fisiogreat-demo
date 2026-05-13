@@ -134,6 +134,22 @@ class VoiceCopy:
         return "Antes de cerrar la cita necesito un teléfono o correo electrónico para enviarte la confirmación."
 
     @staticmethod
+    def slot_taken_reoffer_with_contact() -> str:
+        return "Ese hueco acaba de ocuparse. Conservo tu contacto y te doy otras opciones para el mismo día."
+
+    @staticmethod
+    def slot_taken_no_more_slots() -> str:
+        return "Ese hueco acaba de ocuparse y no veo más huecos libres ese día. ¿Quieres que miremos otro día?"
+
+    @staticmethod
+    def pending_alternative_slot_choice() -> str:
+        return "Todavía no he cerrado la cita. Te he dejado opciones alternativas; dime primera, segunda o tercera."
+
+    @staticmethod
+    def pending_another_day_choice() -> str:
+        return "Todavía no he cerrado la cita. Dime otro día y lo miro."
+
+    @staticmethod
     def thanks_name_then_date(first_name: str) -> str:
         return f"Gracias, {first_name}. ¿Qué día te va bien?"
 

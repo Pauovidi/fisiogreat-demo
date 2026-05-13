@@ -32,6 +32,27 @@ def _busy(day: dt.date, start_time: dt.time, end_time: dt.time):
     }
 
 
+def _create_internal_appointment(
+    start: dt.datetime,
+    end: dt.datetime,
+    *,
+    status: str = "confirmed",
+    calendar_event_id: str = "internal-event",
+):
+    return asyncio.run(supabase_repo.create_appointment(
+        clinic_id=settings.DEMO_CLINIC_ID,
+        patient_id="patient-internal",
+        service_type="sesion de fisioterapia",
+        start_at=start.isoformat(),
+        end_at=end.isoformat(),
+        status=status,
+        calendar_event_id=calendar_event_id,
+        channel="voice",
+        external_user_id="CA-internal",
+        metadata={"patient_name": "Pau Marco"},
+    ))
+
+
 def test_booking_service_confirms_mock_appointment():
     STORE.reset()
     CALENDAR_STORE.reset()
@@ -443,6 +464,131 @@ def test_booking_service_propose_slots_ignores_original_event_and_cancelled_even
     )
     calendar_service.delete_event(cancelled_id)
     slots = propose_slots(start, "sesion de fisioterapia", count=1, time_pref="morning")
+    assert slots[0]["start"].time() == dt.time(10, 0)
+
+
+def test_booking_service_propose_slots_filters_confirmed_internal_appointments(monkeypatch):
+    STORE.reset()
+    CALENDAR_STORE.reset()
+    start = (dt.datetime.now() + dt.timedelta(days=7)).replace(hour=10, minute=0, second=0, microsecond=0)
+    monkeypatch.setattr("app.services.booking_service.calendar_service.free_busy", lambda *_args, **_kwargs: [])
+    _create_internal_appointment(start, start + dt.timedelta(minutes=45), status="confirmed")
+
+    slots = propose_slots(start, "sesion de fisioterapia", count=3, time_pref="morning")
+
+    assert slots
+    assert slots[0]["start"].time() == dt.time(10, 45)
+
+
+def test_booking_service_propose_slots_filters_active_booking_locks(monkeypatch):
+    STORE.reset()
+    CALENDAR_STORE.reset()
+    start = (dt.datetime.now() + dt.timedelta(days=7)).replace(hour=10, minute=0, second=0, microsecond=0)
+    monkeypatch.setattr("app.services.booking_service.calendar_service.free_busy", lambda *_args, **_kwargs: [])
+    asyncio.run(supabase_repo.acquire_booking_lock(
+        clinic_id=settings.DEMO_CLINIC_ID,
+        resource_id=settings.GOOGLE_CALENDAR_ID or "demo-calendar",
+        start_at=start,
+        end_at=start + dt.timedelta(minutes=45),
+    ))
+
+    slots = propose_slots(start, "sesion de fisioterapia", count=3, time_pref="morning")
+
+    assert slots
+    assert slots[0]["start"].time() == dt.time(10, 45)
+
+
+def test_booking_service_propose_slots_ignores_cancelled_appointments_and_released_or_expired_locks(monkeypatch):
+    STORE.reset()
+    CALENDAR_STORE.reset()
+    start = (dt.datetime.now() + dt.timedelta(days=7)).replace(hour=10, minute=0, second=0, microsecond=0)
+    resource_id = settings.GOOGLE_CALENDAR_ID or "demo-calendar"
+    monkeypatch.setattr("app.services.booking_service.calendar_service.free_busy", lambda *_args, **_kwargs: [])
+    _create_internal_appointment(start, start + dt.timedelta(minutes=45), status="cancelled")
+    asyncio.run(supabase_repo.acquire_booking_lock(
+        clinic_id=settings.DEMO_CLINIC_ID,
+        resource_id=resource_id,
+        start_at=start,
+        end_at=start + dt.timedelta(minutes=45),
+    ))
+    asyncio.run(supabase_repo.release_booking_lock(
+        clinic_id=settings.DEMO_CLINIC_ID,
+        resource_id=resource_id,
+        start_at=start,
+        end_at=start + dt.timedelta(minutes=45),
+    ))
+    asyncio.run(supabase_repo.acquire_booking_lock(
+        clinic_id=settings.DEMO_CLINIC_ID,
+        resource_id=resource_id,
+        start_at=start + dt.timedelta(hours=1),
+        end_at=start + dt.timedelta(hours=1, minutes=45),
+    ))
+    for lock in STORE.locks.values():
+        if lock.get("start_at") == (start + dt.timedelta(hours=1)).isoformat():
+            lock["status"] = "expired"
+
+    slots = propose_slots(start, "sesion de fisioterapia", count=3, time_pref="morning")
+
+    assert slots[0]["start"].time() == dt.time(10, 0)
+
+
+def test_booking_service_propose_slots_returns_two_after_internal_filter(monkeypatch):
+    STORE.reset()
+    CALENDAR_STORE.reset()
+    start = (dt.datetime.now() + dt.timedelta(days=7)).replace(hour=10, minute=0, second=0, microsecond=0)
+    monkeypatch.setattr("app.services.booking_service.calendar_service.free_busy", lambda *_args, **_kwargs: [])
+    _create_internal_appointment(
+        start.replace(hour=11),
+        start.replace(hour=15),
+        status="confirmed",
+        calendar_event_id="internal-late-event",
+    )
+
+    slots = propose_slots(start, "sesion de fisioterapia", count=3, time_pref="morning")
+
+    assert [slot["start"].time() for slot in slots] == [dt.time(10, 0), dt.time(10, 15)]
+
+
+def test_confirm_slot_rejects_existing_internal_appointment_even_if_calendar_is_free(monkeypatch):
+    STORE.reset()
+    CALENDAR_STORE.reset()
+    start = dt.datetime(2026, 5, 14, 10, 0)
+    monkeypatch.setattr("app.services.booking_service.calendar_service.free_busy", lambda *_args, **_kwargs: [])
+    _create_internal_appointment(start, start + dt.timedelta(minutes=45), status="confirmed")
+
+    result = asyncio.run(confirm_slot(
+        channel="voice",
+        external_user_id="CA-internal-double",
+        service_type="sesion de fisioterapia",
+        start_at=start,
+        patient_name="Ana Marco",
+        contact_email="ana@example.com",
+    ))
+
+    assert not result.ok
+    assert result.reason == "double_booking"
+    assert len(STORE.appointments) == 1
+
+
+def test_cancel_releases_lock_so_slot_can_be_offered_again(monkeypatch):
+    STORE.reset()
+    CALENDAR_STORE.reset()
+    start = dt.datetime(2026, 5, 14, 10, 0)
+    monkeypatch.setattr("app.services.booking_service.calendar_service.free_busy", lambda *_args, **_kwargs: [])
+
+    created = asyncio.run(confirm_slot(
+        channel="whatsapp",
+        external_user_id="+34600000001",
+        service_type="sesion de fisioterapia",
+        start_at=start,
+        patient_name="Pau Marco",
+    ))
+    assert created.ok
+    cancelled = asyncio.run(cancel_appointment(created.appointment["id"]))
+    assert cancelled.ok
+
+    slots = propose_slots(start, "sesion de fisioterapia", count=1, time_pref="morning")
+
     assert slots[0]["start"].time() == dt.time(10, 0)
 
 

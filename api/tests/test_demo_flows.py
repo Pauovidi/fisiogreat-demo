@@ -567,15 +567,16 @@ def test_voice_preserves_selected_slot_through_contact():
     assert selected["end_at"] == dt.datetime(2026, 5, 14, 11, 0)
 
 
-def test_voice_reoffers_when_selected_slot_gets_busy_and_preserves_contact(monkeypatch):
-    call_sid = "CA-voice-reoffer-preserve-contact"
+@pytest.mark.parametrize("busy_reason", ["calendar_busy", "double_booking"])
+def test_voice_reoffers_when_selected_slot_gets_busy_and_preserves_contact(monkeypatch, busy_reason):
+    call_sid = f"CA-voice-reoffer-preserve-contact-{busy_reason}"
     reset_state(call_sid)
     calls = []
 
     async def fake_confirm_slot(**kwargs):
         calls.append(kwargs)
         if len(calls) == 1:
-            return BookingResult(False, reason="calendar_busy")
+            return BookingResult(False, reason=busy_reason)
         return BookingResult(True, appointment={"metadata": {"patient_name": kwargs.get("patient_name")}})
 
     def fake_slots(*_args, **_kwargs):
@@ -598,10 +599,15 @@ def test_voice_reoffers_when_selected_slot_gets_busy_and_preserves_contact(monke
     assert "conservo tu contacto" in reoffer.text.lower()
     assert CTX.get_stage(call_sid) == "offering_slots"
     assert CTX.get(call_sid)["contact_email"] == "marcos@ejemplo.com"
+    assert CTX.get(call_sid)["slot_reoffer_pending"] is True
     assert CTX.get(call_sid)["offered_slots"] == [
         "jueves 14/05 a las 10:15",
         "jueves 14/05 a las 10:30",
     ]
+
+    thanks = post_voice(call_sid, SpeechResult="gracias")
+    assert "opciones alternativas" in thanks.text.lower()
+    assert "teléfono o correo electrónico" not in thanks.text.lower()
 
     confirmed = post_voice(call_sid, SpeechResult="opción dos")
 
@@ -610,6 +616,34 @@ def test_voice_reoffers_when_selected_slot_gets_busy_and_preserves_contact(monke
     assert calls[1]["contact_email"] == "marcos@ejemplo.com"
     assert calls[1]["start_at"] == dt.datetime(2026, 5, 14, 10, 30)
     assert CTX.get_stage(call_sid) == "completed"
+
+
+def test_voice_busy_reoffer_without_more_slots_asks_for_another_day(monkeypatch):
+    call_sid = "CA-voice-reoffer-no-more-slots"
+    reset_state(call_sid)
+
+    async def fake_confirm_slot(**_kwargs):
+        return BookingResult(False, reason="double_booking")
+
+    def fake_slots(*_args, **_kwargs):
+        return [{"start": dt.datetime(2026, 5, 14, 10, 0), "end": dt.datetime(2026, 5, 14, 11, 0)}]
+
+    monkeypatch.setattr("app.routers.voice.confirm_slot", fake_confirm_slot)
+    monkeypatch.setattr("app.routers.voice.booking_propose_slots", fake_slots)
+
+    post_voice(call_sid)
+    post_voice(call_sid, SpeechResult="valoracion inicial")
+    post_voice(call_sid, SpeechResult="Pau Marco")
+    post_voice(call_sid, SpeechResult="jueves")
+    post_voice(call_sid, SpeechResult="primera")
+    reoffer = post_voice(call_sid, SpeechResult="marcos arroba ejemplo punto com")
+    thanks = post_voice(call_sid, SpeechResult="gracias")
+
+    assert "no veo más huecos libres ese día" in reoffer.text.lower()
+    assert "dime otro día" in thanks.text.lower()
+    assert "teléfono o correo electrónico" not in thanks.text.lower()
+    assert CTX.get(call_sid)["contact_email"] == "marcos@ejemplo.com"
+    assert CTX.get_stage(call_sid) == "awaiting_date"
 
 
 def test_voice_reoffer_without_contact_still_asks_contact_after_slot_selection():

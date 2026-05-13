@@ -21,6 +21,7 @@ from ..services import supabase_repo
 from ..services.booking_service import (
     cancel_appointment,
     confirm_slot,
+    is_busy_booking_reason,
     list_future_appointments,
     parse_slot_label,
     propose_slots as booking_propose_slots,
@@ -384,6 +385,7 @@ def _log_turn(call_sid: str, stats: Dict[str, Any]):
         "contact_present_before_confirm": stats.get("contact_present_before_confirm"),
         "confirm_attempt_after_contact": stats.get("confirm_attempt_after_contact"),
         "confirm_slot_revalidation_result": stats.get("confirm_slot_revalidation_result"),
+        "confirm_slot_busy_reason": stats.get("confirm_slot_busy_reason"),
         "slot_reoffer_reason": stats.get("slot_reoffer_reason"),
         "reoffer_due_to_slot_taken": stats.get("reoffer_due_to_slot_taken"),
         "failed_slot_start": stats.get("failed_slot_start"),
@@ -533,6 +535,18 @@ def _selected_slot_details(call_sid: str) -> Optional[Dict[str, Any]]:
 
 def _contact_present(ctx: Dict[str, Any]) -> bool:
     return bool(ctx.get("contact_phone") or ctx.get("contact_email"))
+
+
+def _pending_booking_with_contact_reply(call_sid: str, stage: Optional[str] = None) -> Optional[str]:
+    ctx = CTX.get(call_sid) or {}
+    if not _contact_present(ctx):
+        return None
+    stage = stage or CTX.get_stage(call_sid)
+    if stage == "offering_slots" and _current_slots(call_sid):
+        return copy.pending_alternative_slot_choice()
+    if ctx.get("slot_reoffer_pending") or stage in {"awaiting_date", "awaiting_contact", "awaiting_contact_email", "awaiting_contact_phone"}:
+        return copy.pending_another_day_choice()
+    return None
 
 
 def _clear_selected_slot(call_sid: str) -> None:
@@ -790,14 +804,17 @@ def _reoffer_after_slot_taken(
     call_sid: str,
     details: Dict[str, Any],
     stats: Dict[str, Any],
+    *,
+    busy_reason: str = "calendar_busy",
 ) -> Response:
     ctx = CTX.get(call_sid) or {}
     service = details.get("service_type") or ctx.get("service") or "sesion de fisioterapia"
     date_pref = details.get("date") or ctx.get("date_pref")
     time_pref = ctx.get("time_pref")
     failed_start = details.get("start_at")
+    ctx["slot_reoffer_pending"] = True
     stats["reoffer_due_to_slot_taken"] = True
-    stats["slot_reoffer_reason"] = "calendar_busy"
+    stats["slot_reoffer_reason"] = busy_reason
     stats["failed_slot_start"] = failed_start.isoformat() if isinstance(failed_start, dt.datetime) else None
     stats["excluded_failed_slot"] = bool(failed_start)
     stats["contact_preserved_after_reoffer"] = _contact_present(ctx)
@@ -808,7 +825,7 @@ def _reoffer_after_slot_taken(
         stats["reoffer_slots_count"] = 0
         return _respond_gather(
             call_sid,
-            "Ese hueco acaba de ocuparse. Conservo tu contacto. ¿Qué día te va bien?",
+            copy.slot_taken_no_more_slots(),
             stats,
         )
     reoffer_slots = _filter_failed_slot_labels(
@@ -818,6 +835,7 @@ def _reoffer_after_slot_taken(
             time_pref,
             count=VOICE_PAGE_SIZE + 1,
             original_start_at=failed_start,
+            allow_dummy_fallback=False,
         ),
         failed_start,
     )
@@ -827,10 +845,11 @@ def _reoffer_after_slot_taken(
     stats["stage_after"] = "offering_slots"
     stats["reoffer_slots_count"] = len(visible_slots)
     stats["selected_slot_after_reoffer"] = visible_slots[0] if visible_slots else None
-    prefix = "Ese hueco acaba de ocuparse. Conservo tu contacto y te doy otras opciones para el mismo día."
     if not visible_slots:
-        return _respond_gather(call_sid, f"{prefix} {copy.no_slots_for_day(date_pref, time_pref=time_pref)}", stats)
-    return _respond_gather(call_sid, f"{prefix} {copy.propose_slots(visible_slots, time_pref=time_pref)}", stats)
+        CTX.set_stage(call_sid, "awaiting_date")
+        stats["stage_after"] = "awaiting_date"
+        return _respond_gather(call_sid, copy.slot_taken_no_more_slots(), stats)
+    return _respond_gather(call_sid, f"{copy.slot_taken_reoffer_with_contact()} {copy.propose_slots(visible_slots, time_pref=time_pref)}", stats)
 
 
 def _reoffer_after_lost_selection(call_sid: str, stats: Dict[str, Any]) -> Response:
@@ -901,9 +920,10 @@ async def _confirm_selected_slot_with_contact(
             stats["stage_after"] = "awaiting_contact"
             stats["confirm_slot_revalidation_result"] = "missing_contact"
             return _respond_gather(call_sid, _contact_retry_prompt(call_sid), stats)
-        if booking_result.reason == "calendar_busy":
+        if is_busy_booking_reason(booking_result.reason):
             stats["confirm_slot_revalidation_result"] = "busy"
-            return _reoffer_after_slot_taken(call_sid, details, stats)
+            stats["confirm_slot_busy_reason"] = booking_result.reason
+            return _reoffer_after_slot_taken(call_sid, details, stats, busy_reason=booking_result.reason or "slot_busy")
         stats["confirm_slot_revalidation_result"] = "error"
         stats["stage_after"] = CTX.get_stage(call_sid)
         return _respond_gather(call_sid, "No he podido confirmar la cita ahora mismo. Tu cita no se ha cerrado.", stats)
@@ -1202,15 +1222,30 @@ async def agent_entry(
         stats["intent_detected"] = route["type"]
 
         if current_stage in {"awaiting_contact", "awaiting_contact_email", "awaiting_contact_phone"} and route["type"] in {"thanks", "farewell"}:
+            pending_reply = _pending_booking_with_contact_reply(CallSid, current_stage)
+            if pending_reply:
+                stats["branch"] = "pending_booking_contact_present"
+                stats["stage_after"] = current_stage
+                return _respond_gather(CallSid, pending_reply, stats)
             stats["branch"] = "contact_required_before_close"
             stats["stage_after"] = current_stage
             return _respond_gather(CallSid, copy.contact_required_before_closing(), stats)
 
         if route["type"] == "thanks":
+            pending_reply = _pending_booking_with_contact_reply(CallSid, current_stage)
+            if pending_reply:
+                stats["branch"] = "pending_booking_slot_choice"
+                stats["stage_after"] = current_stage
+                return _respond_gather(CallSid, pending_reply, stats)
             stats["branch"] = "thanks"
             stats["stage_after"] = current_stage
             return _respond_gather(CallSid, _recent_booking_reply(CallSid), stats)
         if route["type"] == "farewell":
+            pending_reply = _pending_booking_with_contact_reply(CallSid, current_stage)
+            if pending_reply:
+                stats["branch"] = "pending_booking_slot_choice"
+                stats["stage_after"] = current_stage
+                return _respond_gather(CallSid, pending_reply, stats)
             stats["branch"] = "farewell"
             stats["stage_after"] = current_stage
             return _respond_gather(CallSid, _recent_booking_reply(CallSid, farewell=True), stats)

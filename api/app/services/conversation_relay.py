@@ -40,6 +40,7 @@ from .salon_knowledge import out_of_scope_answer
 from .booking_service import (
     cancel_appointment,
     confirm_slot,
+    is_busy_booking_reason,
     list_future_appointments,
     parse_slot_label,
     propose_slots as booking_propose_slots,
@@ -161,6 +162,7 @@ def _log_conversationrelay_turn(
         "contact_present_before_confirm": slot_confirm.get("contact_present_before_confirm"),
         "confirm_attempt_after_contact": slot_confirm.get("confirm_attempt_after_contact"),
         "confirm_slot_revalidation_result": slot_confirm.get("confirm_slot_revalidation_result"),
+        "confirm_slot_busy_reason": slot_confirm.get("confirm_slot_busy_reason"),
         "slot_reoffer_reason": reoffer.get("slot_reoffer_reason"),
         "reoffer_due_to_slot_taken": reoffer.get("reoffer_due_to_slot_taken"),
         "failed_slot_start": reoffer.get("failed_slot_start"),
@@ -236,6 +238,7 @@ def _remember_slot_confirm(
     *,
     contact_present_before_confirm: Optional[bool] = None,
     revalidation_result: Optional[str] = None,
+    busy_reason: Optional[str] = None,
 ) -> None:
     ctx = CTX.get(key) or {}
     payload: Dict[str, Any] = {
@@ -244,6 +247,7 @@ def _remember_slot_confirm(
         "contact_present_before_confirm": contact_present_before_confirm,
         "confirm_attempt_after_contact": bool(details and contact_present_before_confirm),
         "confirm_slot_revalidation_result": revalidation_result,
+        "confirm_slot_busy_reason": busy_reason,
     }
     if details:
         payload["selected_slot_start"] = details["start_at"].isoformat()
@@ -337,6 +341,18 @@ def _selected_slot_details(key: str) -> Optional[Dict[str, Any]]:
 
 def _contact_present(ctx: Dict[str, Any]) -> bool:
     return bool(ctx.get("contact_phone") or ctx.get("contact_email"))
+
+
+def _pending_booking_with_contact_reply(key: str, stage: Optional[str] = None) -> Optional[str]:
+    ctx = CTX.get(key) or {}
+    if not _contact_present(ctx):
+        return None
+    stage = stage or CTX.get_stage(key)
+    if stage == "offering_slots" and _current_slots(key):
+        return copy.pending_alternative_slot_choice()
+    if ctx.get("slot_reoffer_pending") or stage in {"awaiting_date", "awaiting_contact", "awaiting_contact_email", "awaiting_contact_phone"}:
+        return copy.pending_another_day_choice()
+    return None
 
 
 def _clear_selected_slot(key: str) -> None:
@@ -639,13 +655,14 @@ def _set_contact_from_parse(
     ctx["contact_parse_failures"] = 0
 
 
-def _reoffer_after_slot_taken(key: str, details: Dict[str, Any]) -> str:
+def _reoffer_after_slot_taken(key: str, details: Dict[str, Any], *, busy_reason: str = "calendar_busy") -> str:
     ctx = CTX.get(key) or {}
     service = details.get("service_type") or ctx.get("service") or "sesion de fisioterapia"
     date_pref = details.get("date") or ctx.get("date_pref")
     time_pref = ctx.get("time_pref")
     contact_preserved = _contact_present(ctx)
     failed_start = details.get("start_at")
+    ctx["slot_reoffer_pending"] = True
     _clear_selected_slot(key)
     if not isinstance(date_pref, dt.date):
         CTX.set_stage(key, "awaiting_date")
@@ -653,12 +670,12 @@ def _reoffer_after_slot_taken(key: str, details: Dict[str, Any]) -> str:
             key,
             contact_preserved=contact_preserved,
             selected_slot_after_reoffer=None,
-            reason="calendar_busy",
+            reason=busy_reason,
             failed_slot_start=failed_start,
             excluded_failed_slot=bool(failed_start),
             reoffer_slots_count=0,
         )
-        return "Ese hueco acaba de ocuparse. Conservo tu contacto. ¿Qué día te va bien?"
+        return copy.slot_taken_no_more_slots()
     reoffer_slots = _filter_failed_slot_labels(
         _build_short_slot_labels(
             service,
@@ -666,6 +683,7 @@ def _reoffer_after_slot_taken(key: str, details: Dict[str, Any]) -> str:
             time_pref,
             count=CR_SLOT_PAGE_SIZE + 1,
             original_start_at=failed_start,
+            allow_dummy_fallback=False,
         ),
         failed_start,
     )
@@ -676,15 +694,15 @@ def _reoffer_after_slot_taken(key: str, details: Dict[str, Any]) -> str:
         key,
         contact_preserved=contact_preserved,
         selected_slot_after_reoffer=visible_slots[0] if visible_slots else None,
-        reason="calendar_busy",
+        reason=busy_reason,
         failed_slot_start=failed_start,
         excluded_failed_slot=bool(failed_start),
         reoffer_slots_count=len(visible_slots),
     )
-    prefix = "Ese hueco acaba de ocuparse. Conservo tu contacto y te doy otras opciones para el mismo día."
     if not visible_slots:
-        return f"{prefix} {copy.no_slots_for_day(date_pref, time_pref=time_pref)}"
-    return f"{prefix} {copy.propose_slots(visible_slots, time_pref=time_pref)}"
+        CTX.set_stage(key, "awaiting_date")
+        return copy.slot_taken_no_more_slots()
+    return f"{copy.slot_taken_reoffer_with_contact()} {copy.propose_slots(visible_slots, time_pref=time_pref)}"
 
 
 def _reoffer_after_lost_selection(key: str) -> str:
@@ -750,9 +768,15 @@ async def _confirm_selected_slot_with_contact(
             CTX.set_stage(key, "awaiting_contact")
             _remember_slot_confirm(key, details, contact_present_before_confirm=False, revalidation_result="missing_contact")
             return _contact_retry_prompt(key)
-        if booking_result.reason == "calendar_busy":
-            _remember_slot_confirm(key, details, contact_present_before_confirm=contact_present, revalidation_result="busy")
-            return _reoffer_after_slot_taken(key, details)
+        if is_busy_booking_reason(booking_result.reason):
+            _remember_slot_confirm(
+                key,
+                details,
+                contact_present_before_confirm=contact_present,
+                revalidation_result="busy",
+                busy_reason=booking_result.reason,
+            )
+            return _reoffer_after_slot_taken(key, details, busy_reason=booking_result.reason or "slot_busy")
         _remember_slot_confirm(key, details, contact_present_before_confirm=contact_present, revalidation_result="error")
         return "No he podido confirmar la cita ahora mismo. Tu cita no se ha cerrado."
 
@@ -871,11 +895,20 @@ async def _handle_user_input_core(key: str, user_text: str) -> str:
     route_peek = route_message(user_text)
 
     if current_stage in {"awaiting_contact", "awaiting_contact_email", "awaiting_contact_phone"} and route_peek["type"] in {"thanks", "farewell"}:
+        pending_reply = _pending_booking_with_contact_reply(key, current_stage)
+        if pending_reply:
+            return pending_reply
         return copy.contact_required_before_closing()
 
     if route_peek["type"] == "thanks":
+        pending_reply = _pending_booking_with_contact_reply(key, current_stage)
+        if pending_reply:
+            return pending_reply
         return _recent_booking_reply(key)
     if route_peek["type"] == "farewell":
+        pending_reply = _pending_booking_with_contact_reply(key, current_stage)
+        if pending_reply:
+            return pending_reply
         return _recent_booking_reply(key, farewell=True)
 
     if current_stage == "completed":

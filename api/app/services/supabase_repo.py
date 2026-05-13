@@ -1,7 +1,8 @@
 import datetime as dt
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -26,6 +27,9 @@ class InMemorySupabaseStore:
 
 
 STORE = InMemorySupabaseStore()
+
+BLOCKING_APPOINTMENT_STATUSES = {"confirmed", "scheduled", "pending"}
+BLOCKING_LOCK_STATUSES = {"held"}
 
 
 def supabase_configured() -> bool:
@@ -197,6 +201,155 @@ async def get_appointment(appointment_id: str) -> Optional[Dict[str, Any]]:
         rows = await _select("appointments", {"id": f"eq.{appointment_id}"})
         return rows[0] if rows else None
     return None
+
+
+def list_internal_busy_intervals(
+    *,
+    clinic_id: str,
+    resource_id: str,
+    start_at: dt.datetime,
+    end_at: dt.datetime,
+    ignore_calendar_event_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    intervals: List[Dict[str, str]] = []
+    ignored_ranges: List[Tuple[dt.datetime, dt.datetime]] = []
+    appointment_busy_count = 0
+    booking_locks_busy_count = 0
+
+    for appointment in _list_busy_appointment_rows(
+        clinic_id=clinic_id,
+        start_at=start_at,
+        end_at=end_at,
+    ):
+        appt_start = _parse_datetime(appointment.get("start_at"))
+        appt_end = _parse_datetime(appointment.get("end_at"))
+        if not appt_start or not appt_end or not _overlaps(start_at, end_at, appt_start, appt_end):
+            continue
+        if ignore_calendar_event_id and appointment.get("calendar_event_id") == ignore_calendar_event_id:
+            ignored_ranges.append((appt_start, appt_end))
+            continue
+        appointment_busy_count += 1
+        intervals.append({"start": appt_start.isoformat(), "end": appt_end.isoformat(), "source": "appointment"})
+
+    for lock in _list_busy_lock_rows(
+        clinic_id=clinic_id,
+        resource_id=resource_id,
+        start_at=start_at,
+        end_at=end_at,
+    ):
+        if not _is_active_lock(lock):
+            continue
+        lock_start = _parse_datetime(lock.get("start_at"))
+        lock_end = _parse_datetime(lock.get("end_at"))
+        if not lock_start or not lock_end or not _overlaps(start_at, end_at, lock_start, lock_end):
+            continue
+        if any(_same_interval(lock_start, lock_end, ignored_start, ignored_end) for ignored_start, ignored_end in ignored_ranges):
+            continue
+        booking_locks_busy_count += 1
+        intervals.append({"start": lock_start.isoformat(), "end": lock_end.isoformat(), "source": "booking_lock"})
+
+    return {
+        "intervals": intervals,
+        "appointment_busy_count": appointment_busy_count,
+        "booking_locks_busy_count": booking_locks_busy_count,
+    }
+
+
+def _list_busy_appointment_rows(
+    *,
+    clinic_id: str,
+    start_at: dt.datetime,
+    end_at: dt.datetime,
+) -> List[Dict[str, Any]]:
+    if supabase_configured():
+        return _select_sync(
+            "appointments",
+            {
+                "clinic_id": f"eq.{clinic_id}",
+                "status": f"in.({','.join(sorted(BLOCKING_APPOINTMENT_STATUSES))})",
+                "start_at": f"lt.{end_at.isoformat()}",
+                "end_at": f"gt.{start_at.isoformat()}",
+                "order": "start_at.asc",
+            },
+            limit=200,
+        )
+    return [
+        appointment
+        for appointment in STORE.appointments.values()
+        if appointment.get("clinic_id") == clinic_id
+        and appointment.get("status") in BLOCKING_APPOINTMENT_STATUSES
+    ]
+
+
+def _list_busy_lock_rows(
+    *,
+    clinic_id: str,
+    resource_id: str,
+    start_at: dt.datetime,
+    end_at: dt.datetime,
+) -> List[Dict[str, Any]]:
+    if supabase_configured():
+        return _select_sync(
+            "booking_locks",
+            {
+                "clinic_id": f"eq.{clinic_id}",
+                "resource_id": f"eq.{resource_id}",
+                "status": f"in.({','.join(sorted(BLOCKING_LOCK_STATUSES))})",
+                "start_at": f"lt.{end_at.isoformat()}",
+                "end_at": f"gt.{start_at.isoformat()}",
+                "order": "start_at.asc",
+            },
+            limit=200,
+        )
+    return [
+        lock
+        for lock in STORE.locks.values()
+        if lock.get("clinic_id") == clinic_id
+        and lock.get("resource_id") == resource_id
+    ]
+
+
+def _select_sync(table: str, params: Dict[str, str], *, limit: int = 1) -> List[Dict[str, Any]]:
+    query = {"select": "*", "limit": str(limit), **params}
+    with httpx.Client(timeout=10.0) as client:
+        response = client.get(_url(table), headers=_headers(), params=query)
+        response.raise_for_status()
+        rows = response.json()
+        return rows if isinstance(rows, list) else []
+
+
+def _is_active_lock(lock: Dict[str, Any]) -> bool:
+    if lock.get("status") not in BLOCKING_LOCK_STATUSES:
+        return False
+    expires_at = _parse_datetime(lock.get("expires_at"))
+    if expires_at and _as_aware(expires_at) <= _as_aware(dt.datetime.now()):
+        return False
+    return True
+
+
+def _overlaps(
+    left_start: dt.datetime,
+    left_end: dt.datetime,
+    right_start: dt.datetime,
+    right_end: dt.datetime,
+) -> bool:
+    return _as_aware(left_start) < _as_aware(right_end) and _as_aware(right_start) < _as_aware(left_end)
+
+
+def _same_interval(
+    left_start: dt.datetime,
+    left_end: dt.datetime,
+    right_start: dt.datetime,
+    right_end: dt.datetime,
+) -> bool:
+    return _as_aware(left_start) == _as_aware(right_start) and _as_aware(left_end) == _as_aware(right_end)
+
+
+def _as_aware(value: dt.datetime) -> dt.datetime:
+    zone = ZoneInfo(settings.GOOGLE_CALENDAR_TIMEZONE)
+    if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
+        return value.replace(tzinfo=zone)
+    return value.astimezone(zone)
 
 
 async def list_future_appointments_for_patient(

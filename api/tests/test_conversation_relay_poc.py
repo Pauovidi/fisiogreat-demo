@@ -12,6 +12,7 @@ from app.services import conversation_relay
 from app.services.booking_service import BookingResult, confirm_slot
 from app.services.calendar_service import CALENDAR_STORE
 from app.services.supabase_repo import STORE
+from app.utils.date_parser import parse_voice_date
 from app.utils.mini_context import CTX
 
 
@@ -360,6 +361,37 @@ def test_conversationrelay_accepts_spoken_email_contact_and_confirms():
     assert CTX.get_stage(call_sid) == "completed"
 
 
+def test_conversationrelay_slot_offer_filters_internal_confirmed_appointment(monkeypatch):
+    call_sid = "CA-conversationrelay-internal-busy-slot-filter"
+    reset_state(call_sid)
+    target_date = parse_voice_date("jueves").target_date
+    blocked_start = dt.datetime.combine(target_date, dt.time(10, 0))
+    monkeypatch.setattr("app.services.booking_service.calendar_service.free_busy", lambda *_args, **_kwargs: [])
+    asyncio.run(conversation_relay.supabase_repo.create_appointment(
+        clinic_id=settings.DEMO_CLINIC_ID,
+        patient_id="patient-busy-conversationrelay",
+        service_type="valoracion inicial",
+        start_at=blocked_start.isoformat(),
+        end_at=(blocked_start + dt.timedelta(hours=1)).isoformat(),
+        status="confirmed",
+        calendar_event_id="internal-conversationrelay-busy",
+        channel="voice",
+        external_user_id="CA-busy-internal",
+        metadata={"patient_name": "Busy Patient"},
+    ))
+    CTX.set_service(call_sid, "valoracion inicial")
+    CTX.set_patient_name(call_sid, "Pau Marco", "manual")
+    CTX.set_stage(call_sid, "awaiting_date")
+
+    reply = asyncio.run(conversation_relay._handle_user_input(call_sid, "jueves"))
+    offered = CTX.get(call_sid)["offered_slots"]
+
+    assert "las diez," not in reply.lower()
+    assert offered
+    assert not offered[0].endswith("a las 10:00")
+    assert offered[0].endswith("a las 11:00")
+
+
 @pytest.mark.parametrize(
     "contact_request",
     [
@@ -554,7 +586,7 @@ def test_conversationrelay_non_calendar_confirm_failure_does_not_report_slot_tak
     reset_state(call_sid)
 
     async def fake_confirm_slot(**_kwargs):
-        return BookingResult(False, reason="double_booking")
+        return BookingResult(False, reason="integration_error")
 
     monkeypatch.setattr("app.services.conversation_relay.confirm_slot", fake_confirm_slot)
 
@@ -568,15 +600,16 @@ def test_conversationrelay_non_calendar_confirm_failure_does_not_report_slot_tak
     assert not STORE.appointments
 
 
-def test_conversationrelay_preserves_slot_and_contact_after_busy_reoffer(monkeypatch):
-    call_sid = "CA-conversationrelay-reoffer-preserve-contact"
+@pytest.mark.parametrize("busy_reason", ["calendar_busy", "double_booking", "booking_lock_conflict", "slot_busy"])
+def test_conversationrelay_preserves_slot_and_contact_after_busy_reoffer(monkeypatch, busy_reason):
+    call_sid = f"CA-conversationrelay-reoffer-preserve-contact-{busy_reason}"
     reset_state(call_sid)
     calls = []
 
     async def fake_confirm_slot(**kwargs):
         calls.append(kwargs)
         if len(calls) == 1:
-            return BookingResult(False, reason="calendar_busy")
+            return BookingResult(False, reason=busy_reason)
         return BookingResult(True, appointment={"metadata": {"patient_name": kwargs.get("patient_name")}})
 
     monkeypatch.setattr("app.services.conversation_relay.confirm_slot", fake_confirm_slot)
@@ -616,12 +649,18 @@ def test_conversationrelay_preserves_slot_and_contact_after_busy_reoffer(monkeyp
     assert "conservo tu contacto" in reoffer.lower()
     assert CTX.get_stage(call_sid) == "offering_slots"
     assert CTX.get(call_sid)["contact_email"] == "marcos@ejemplo.com"
+    assert CTX.get(call_sid)["slot_reoffer_pending"] is True
     assert CTX.get(call_sid)["offered_slots"] == [
         "jueves 14/05 a las 10:15",
         "jueves 14/05 a las 10:30",
         "jueves 14/05 a las 10:45",
     ]
     assert "jueves 14/05 a las 10:00" not in CTX.get(call_sid)["offered_slots"]
+
+    thanks = asyncio.run(conversation_relay._handle_user_input(call_sid, "gracias"))
+    assert "opciones alternativas" in thanks.lower()
+    assert "teléfono o correo electrónico" not in thanks.lower()
+    assert CTX.get_stage(call_sid) == "offering_slots"
 
     confirmed = asyncio.run(conversation_relay._handle_user_input(call_sid, "opción dos"))
 
@@ -630,6 +669,35 @@ def test_conversationrelay_preserves_slot_and_contact_after_busy_reoffer(monkeyp
     assert calls[1]["contact_email"] == "marcos@ejemplo.com"
     assert calls[1]["start_at"] == dt.datetime(2026, 5, 14, 10, 30)
     assert CTX.get_stage(call_sid) == "completed"
+
+
+def test_conversationrelay_busy_reoffer_without_more_slots_asks_for_another_day(monkeypatch):
+    call_sid = "CA-conversationrelay-reoffer-no-more-slots"
+    reset_state(call_sid)
+
+    async def fake_confirm_slot(**_kwargs):
+        return BookingResult(False, reason="double_booking")
+
+    monkeypatch.setattr("app.services.conversation_relay.confirm_slot", fake_confirm_slot)
+    monkeypatch.setattr("app.services.conversation_relay._build_short_slot_labels", lambda *_args, **_kwargs: ["jueves 14/05 a las 10:00"])
+
+    CTX.set_service(call_sid, "valoracion inicial")
+    CTX.set_patient_name(call_sid, "Pau Marco", "manual")
+    CTX.set_date(call_sid, dt.date(2026, 5, 14))
+    CTX.set_time_pref(call_sid, "morning")
+    CTX.set_slots(call_sid, ["jueves 14/05 a las 10:00"])
+    CTX.set_stage(call_sid, "offering_slots")
+    CTX.next_slots(call_sid, 3)
+
+    asyncio.run(conversation_relay._handle_user_input(call_sid, "la primera"))
+    reply = asyncio.run(conversation_relay._handle_user_input(call_sid, "marcos arroba ejemplo punto com"))
+    thanks = asyncio.run(conversation_relay._handle_user_input(call_sid, "gracias"))
+
+    assert "no veo más huecos libres ese día" in reply.lower()
+    assert "dime otro día" in thanks.lower()
+    assert "teléfono o correo electrónico" not in thanks.lower()
+    assert CTX.get(call_sid)["contact_email"] == "marcos@ejemplo.com"
+    assert CTX.get_stage(call_sid) == "awaiting_date"
 
 
 def test_conversationrelay_contact_retry_copy_is_helpful_and_not_duplicated():
