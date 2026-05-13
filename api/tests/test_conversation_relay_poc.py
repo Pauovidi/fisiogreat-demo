@@ -360,7 +360,7 @@ def test_conversationrelay_accepts_spoken_email_contact_and_confirms():
     assert CTX.get_stage(call_sid) == "completed"
 
 
-@pytest.mark.parametrize("contact_request", ["un email", "un correo"])
+@pytest.mark.parametrize("contact_request", ["un email", "un correo", "correo", "correo.", "email", "por correo", "correo electrónico"])
 def test_conversationrelay_awaiting_contact_accepts_email_request_then_spoken_email(contact_request):
     call_sid = f"CA-conversationrelay-email-request-{contact_request.replace(' ', '-')}"
     reset_state(call_sid)
@@ -387,6 +387,7 @@ def test_conversationrelay_awaiting_contact_accepts_email_request_then_spoken_em
 @pytest.mark.parametrize(
     ("spoken", "expected"),
     [
+        ("marcos@example.com", "marcos@example.com"),
         ("marcos arroba fisiobrade punto com", "marcos@fisiobrade.com"),
         ("marcos arroba uno punto com", "marcos@uno.com"),
     ],
@@ -440,6 +441,83 @@ def test_conversationrelay_awaiting_contact_email_reprompts_email_without_slot_f
     assert not STORE.appointments
 
 
+def test_conversationrelay_awaiting_contact_phone_reprompts_phone_without_slot_fallback():
+    call_sid = "CA-conversationrelay-phone-substage-retry"
+    reset_state(call_sid)
+
+    with client.websocket_connect("/webhook/voice/conversationrelay/ws") as websocket:
+        drive_conversationrelay_to_contact(websocket, call_sid)
+        websocket.send_json({"type": "prompt", "voicePrompt": "teléfono", "last": True})
+        websocket.receive_json()
+        websocket.send_json({"type": "prompt", "voicePrompt": "la segunda", "last": True})
+        retry = websocket.receive_json()
+
+    assert "no he entendido bien el teléfono" in retry["token"].lower()
+    assert "hueco acaba de ocuparse" not in retry["token"].lower()
+    assert CTX.get_stage(call_sid) == "awaiting_contact_phone"
+    assert not STORE.appointments
+
+
+def test_conversationrelay_invalid_contact_never_reports_slot_taken():
+    call_sid = "CA-conversationrelay-invalid-contact-no-busy"
+    reset_state(call_sid)
+
+    with client.websocket_connect("/webhook/voice/conversationrelay/ws") as websocket:
+        drive_conversationrelay_to_contact(websocket, call_sid)
+        websocket.send_json({"type": "prompt", "voicePrompt": "marcos arroba ejemplo", "last": True})
+        retry = websocket.receive_json()
+
+    assert "hueco acaba de ocuparse" not in retry["token"].lower()
+    assert "marcos arroba ejemplo punto com" in retry["token"].lower()
+    assert CTX.get_stage(call_sid) == "awaiting_contact"
+    assert not STORE.appointments
+
+
+def test_conversationrelay_lost_selected_slot_does_not_report_slot_taken():
+    call_sid = "CA-conversationrelay-lost-selected-slot"
+    reset_state(call_sid)
+    CTX.set_service(call_sid, "valoracion inicial")
+    CTX.set_patient_name(call_sid, "Pau Marco", "manual")
+    CTX.set_date(call_sid, dt.date(2026, 5, 14))
+    CTX.set_time_pref(call_sid, "morning")
+    CTX.set_slots(
+        call_sid,
+        [
+            "jueves 14/05 a las 10:00",
+            "jueves 14/05 a las 10:15",
+            "jueves 14/05 a las 10:30",
+        ],
+    )
+    CTX.set_stage(call_sid, "awaiting_contact")
+
+    reply = asyncio.run(conversation_relay._handle_user_input(call_sid, "marcos arroba ejemplo punto com"))
+
+    assert "he perdido la selección del horario" in reply.lower()
+    assert "hueco acaba de ocuparse" not in reply.lower()
+    assert CTX.get(call_sid)["contact_email"] == "marcos@ejemplo.com"
+    assert CTX.get_stage(call_sid) == "offering_slots"
+    assert not STORE.appointments
+
+
+def test_conversationrelay_non_calendar_confirm_failure_does_not_report_slot_taken(monkeypatch):
+    call_sid = "CA-conversationrelay-confirm-error-no-busy"
+    reset_state(call_sid)
+
+    async def fake_confirm_slot(**_kwargs):
+        return BookingResult(False, reason="double_booking")
+
+    monkeypatch.setattr("app.services.conversation_relay.confirm_slot", fake_confirm_slot)
+
+    with client.websocket_connect("/webhook/voice/conversationrelay/ws") as websocket:
+        drive_conversationrelay_to_contact(websocket, call_sid)
+        websocket.send_json({"type": "prompt", "voicePrompt": "marcos arroba ejemplo punto com", "last": True})
+        reply = websocket.receive_json()
+
+    assert "hueco acaba de ocuparse" not in reply["token"].lower()
+    assert "no he podido confirmar" in reply["token"].lower()
+    assert not STORE.appointments
+
+
 def test_conversationrelay_preserves_slot_and_contact_after_busy_reoffer(monkeypatch):
     call_sid = "CA-conversationrelay-reoffer-preserve-contact"
     reset_state(call_sid)
@@ -455,6 +533,7 @@ def test_conversationrelay_preserves_slot_and_contact_after_busy_reoffer(monkeyp
     monkeypatch.setattr(
         "app.services.conversation_relay._build_short_slot_labels",
         lambda *_args, **_kwargs: [
+            "jueves 14/05 a las 10:00",
             "jueves 14/05 a las 10:15",
             "jueves 14/05 a las 10:30",
             "jueves 14/05 a las 10:45",
@@ -492,6 +571,7 @@ def test_conversationrelay_preserves_slot_and_contact_after_busy_reoffer(monkeyp
         "jueves 14/05 a las 10:30",
         "jueves 14/05 a las 10:45",
     ]
+    assert "jueves 14/05 a las 10:00" not in CTX.get(call_sid)["offered_slots"]
 
     confirmed = asyncio.run(conversation_relay._handle_user_input(call_sid, "opción dos"))
 

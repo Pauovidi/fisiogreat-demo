@@ -152,10 +152,19 @@ def _log_conversationrelay_turn(
             else bool(ctx.get("selected_slot") or ctx_before.get("selected_slot"))
         ),
         "contact_stage": contact_parse.get("contact_stage"),
+        "contact_parse_attempt": contact_parse.get("contact_parse_attempt"),
         "contact_parse_result": contact_parse.get("contact_parse_result"),
+        "contact_stage_before": contact_parse.get("contact_stage_before"),
+        "contact_stage_after": contact_parse.get("contact_stage_after"),
+        "selected_slot_present": slot_confirm.get("selected_slot_present"),
         "contact_present_before_confirm": slot_confirm.get("contact_present_before_confirm"),
+        "confirm_attempt_after_contact": slot_confirm.get("confirm_attempt_after_contact"),
         "confirm_slot_revalidation_result": slot_confirm.get("confirm_slot_revalidation_result"),
+        "slot_reoffer_reason": reoffer.get("slot_reoffer_reason"),
         "reoffer_due_to_slot_taken": reoffer.get("reoffer_due_to_slot_taken"),
+        "failed_slot_start": reoffer.get("failed_slot_start"),
+        "excluded_failed_slot": reoffer.get("excluded_failed_slot"),
+        "reoffer_slots_count": reoffer.get("reoffer_slots_count"),
         "contact_preserved_after_reoffer": reoffer.get("contact_preserved_after_reoffer"),
         "selected_slot_after_reoffer": reoffer.get("selected_slot_after_reoffer"),
     }
@@ -212,7 +221,10 @@ def _remember_slot_selection(key: str, raw: str, selected_index: int, selected_l
 def _remember_contact_parse(key: str, stage: str, result: str) -> None:
     ctx = CTX.get(key) or {}
     ctx["_last_contact_parse"] = {
+        "contact_parse_attempt": True,
         "contact_stage": stage,
+        "contact_stage_before": stage,
+        "contact_stage_after": CTX.get_stage(key),
         "contact_parse_result": result,
     }
 
@@ -226,8 +238,10 @@ def _remember_slot_confirm(
 ) -> None:
     ctx = CTX.get(key) or {}
     payload: Dict[str, Any] = {
+        "selected_slot_present": bool(details),
         "selected_slot_preserved": bool(details),
         "contact_present_before_confirm": contact_present_before_confirm,
+        "confirm_attempt_after_contact": bool(details and contact_present_before_confirm),
         "confirm_slot_revalidation_result": revalidation_result,
     }
     if details:
@@ -241,10 +255,18 @@ def _remember_reoffer(
     *,
     contact_preserved: bool,
     selected_slot_after_reoffer: Optional[str],
+    reason: str,
+    failed_slot_start: Optional[dt.datetime] = None,
+    excluded_failed_slot: bool = False,
+    reoffer_slots_count: int = 0,
 ) -> None:
     ctx = CTX.get(key) or {}
     ctx["_last_reoffer"] = {
+        "slot_reoffer_reason": reason,
         "reoffer_due_to_slot_taken": True,
+        "failed_slot_start": failed_slot_start.isoformat() if failed_slot_start else None,
+        "excluded_failed_slot": excluded_failed_slot,
+        "reoffer_slots_count": reoffer_slots_count,
         "contact_preserved_after_reoffer": contact_preserved,
         "selected_slot_after_reoffer": selected_slot_after_reoffer,
     }
@@ -319,6 +341,22 @@ def _contact_present(ctx: Dict[str, Any]) -> bool:
 def _clear_selected_slot(key: str) -> None:
     CTX.set_pending_slot(key, None)
     CTX.set_selected_slot(key, None)
+
+
+def _filter_failed_slot_labels(labels: List[str], failed_start: Optional[dt.datetime]) -> List[str]:
+    if not failed_start:
+        return labels[:CR_SLOT_PAGE_SIZE]
+    failed = failed_start.replace(tzinfo=None)
+    filtered: List[str] = []
+    for label in labels:
+        label_start = parse_slot_label(label)
+        if label_start and label_start.replace(tzinfo=None) == failed:
+            continue
+        if label not in filtered:
+            filtered.append(label)
+        if len(filtered) >= CR_SLOT_PAGE_SIZE:
+            break
+    return filtered
 
 
 @dataclass
@@ -605,31 +643,79 @@ def _reoffer_after_slot_taken(key: str, details: Dict[str, Any]) -> str:
     date_pref = details.get("date") or ctx.get("date_pref")
     time_pref = ctx.get("time_pref")
     contact_preserved = _contact_present(ctx)
+    failed_start = details.get("start_at")
     _clear_selected_slot(key)
     if not isinstance(date_pref, dt.date):
         CTX.set_stage(key, "awaiting_date")
-        _remember_reoffer(key, contact_preserved=contact_preserved, selected_slot_after_reoffer=None)
+        _remember_reoffer(
+            key,
+            contact_preserved=contact_preserved,
+            selected_slot_after_reoffer=None,
+            reason="calendar_busy",
+            failed_slot_start=failed_start,
+            excluded_failed_slot=bool(failed_start),
+            reoffer_slots_count=0,
+        )
         return "Ese hueco acaba de ocuparse. Conservo tu contacto. ¿Qué día te va bien?"
-    CTX.set_slots(
-        key,
+    reoffer_slots = _filter_failed_slot_labels(
         _build_short_slot_labels(
             service,
             date_pref,
             time_pref,
-            original_start_at=details.get("start_at"),
+            count=CR_SLOT_PAGE_SIZE + 1,
+            original_start_at=failed_start,
         ),
+        failed_start,
     )
+    CTX.set_slots(key, reoffer_slots)
     CTX.set_stage(key, "offering_slots")
     visible_slots = CTX.next_slots(key, CR_SLOT_PAGE_SIZE)
     _remember_reoffer(
         key,
         contact_preserved=contact_preserved,
         selected_slot_after_reoffer=visible_slots[0] if visible_slots else None,
+        reason="calendar_busy",
+        failed_slot_start=failed_start,
+        excluded_failed_slot=bool(failed_start),
+        reoffer_slots_count=len(visible_slots),
     )
     prefix = "Ese hueco acaba de ocuparse. Conservo tu contacto y te doy otras opciones para el mismo día."
     if not visible_slots:
         return f"{prefix} {copy.no_slots_for_day(date_pref, time_pref=time_pref)}"
     return f"{prefix} {copy.propose_slots(visible_slots, time_pref=time_pref)}"
+
+
+def _reoffer_after_lost_selection(key: str) -> str:
+    ctx = CTX.get(key) or {}
+    service = ctx.get("service") or "sesion de fisioterapia"
+    date_pref = ctx.get("date_pref")
+    time_pref = ctx.get("time_pref")
+    contact_preserved = _contact_present(ctx)
+    _clear_selected_slot(key)
+    prefix = "Perdona, he perdido la selección del horario. Te vuelvo a mostrar las opciones."
+    if isinstance(date_pref, dt.date):
+        reoffer_slots = _build_short_slot_labels(service, date_pref, time_pref)
+        CTX.set_slots(key, reoffer_slots)
+        CTX.set_stage(key, "offering_slots")
+        visible_slots = CTX.next_slots(key, CR_SLOT_PAGE_SIZE)
+        _remember_reoffer(
+            key,
+            contact_preserved=contact_preserved,
+            selected_slot_after_reoffer=visible_slots[0] if visible_slots else None,
+            reason="selection_lost",
+            reoffer_slots_count=len(visible_slots),
+        )
+        if visible_slots:
+            return f"{prefix} {copy.propose_slots(visible_slots, time_pref=time_pref)}"
+    CTX.set_stage(key, "awaiting_date")
+    _remember_reoffer(
+        key,
+        contact_preserved=contact_preserved,
+        selected_slot_after_reoffer=None,
+        reason="selection_lost",
+        reoffer_slots_count=0,
+    )
+    return f"{prefix} {copy.ask_date(service)}"
 
 
 async def _confirm_selected_slot_with_contact(
@@ -641,9 +727,8 @@ async def _confirm_selected_slot_with_contact(
     details = _selected_slot_details(key)
     service = (details or {}).get("service_type") or ctx.get("service") or "sesion de fisioterapia"
     if not details:
-        CTX.set_stage(key, "awaiting_date")
-        _remember_slot_confirm(key, None, contact_present_before_confirm=_contact_present(ctx), revalidation_result=None)
-        return copy.ask_date(service)
+        _remember_slot_confirm(key, None, contact_present_before_confirm=_contact_present(ctx), revalidation_result="not_called")
+        return _reoffer_after_lost_selection(key)
 
     contact_present = _contact_present(ctx)
     booking_result = await confirm_slot(
@@ -663,7 +748,7 @@ async def _confirm_selected_slot_with_contact(
             CTX.set_stage(key, "awaiting_contact")
             _remember_slot_confirm(key, details, contact_present_before_confirm=False, revalidation_result="missing_contact")
             return _contact_retry_prompt(key)
-        if booking_result.reason in {"calendar_busy", "double_booking"}:
+        if booking_result.reason == "calendar_busy":
             _remember_slot_confirm(key, details, contact_present_before_confirm=contact_present, revalidation_result="busy")
             return _reoffer_after_slot_taken(key, details)
         _remember_slot_confirm(key, details, contact_present_before_confirm=contact_present, revalidation_result="error")
@@ -688,9 +773,10 @@ async def _handle_contact_stage(key: str, user_text: str) -> str:
         if email:
             _set_contact_from_parse(key, email=email)
             reply = await _confirm_selected_slot_with_contact(key, metadata={"transport": "conversationrelay"})
-            _remember_contact_parse(key, current_stage, "accepted")
+            _remember_contact_parse(key, current_stage, "email")
             return reply
-        _remember_contact_parse(key, current_stage, "rejected")
+        _remember_slot_confirm(key, _selected_slot_details(key), contact_present_before_confirm=_contact_present(ctx), revalidation_result="not_called")
+        _remember_contact_parse(key, current_stage, "invalid")
         return _contact_email_retry_prompt(key)
 
     if current_stage == "awaiting_contact_phone":
@@ -698,28 +784,34 @@ async def _handle_contact_stage(key: str, user_text: str) -> str:
         if phone:
             _set_contact_from_parse(key, phone=phone)
             reply = await _confirm_selected_slot_with_contact(key, metadata={"transport": "conversationrelay"})
-            _remember_contact_parse(key, current_stage, "accepted")
+            _remember_contact_parse(key, current_stage, "phone")
             return reply
-        _remember_contact_parse(key, current_stage, "rejected")
+        _remember_slot_confirm(key, _selected_slot_details(key), contact_present_before_confirm=_contact_present(ctx), revalidation_result="not_called")
+        _remember_contact_parse(key, current_stage, "invalid")
         return _contact_phone_retry_prompt(key)
 
     phone, email = extract_contact(user_text)
+    used_from = False
     if not phone and not email and confirms_current_phone(user_text) and ctx.get("suggested_contact_phone"):
         phone = ctx.get("suggested_contact_phone")
+        used_from = True
     if phone or email:
         _set_contact_from_parse(key, phone=phone, email=email)
         reply = await _confirm_selected_slot_with_contact(key, metadata={"transport": "conversationrelay"})
-        _remember_contact_parse(key, current_stage, "accepted")
+        _remember_contact_parse(key, current_stage, "from" if used_from else "phone" if phone else "email")
         return reply
     if requests_email_contact(user_text):
         CTX.set_stage(key, "awaiting_contact_email")
+        _remember_slot_confirm(key, _selected_slot_details(key), contact_present_before_confirm=_contact_present(ctx), revalidation_result="not_called")
         _remember_contact_parse(key, current_stage, "method_only")
         return copy.ask_contact_email()
     if requests_phone_contact(user_text):
         CTX.set_stage(key, "awaiting_contact_phone")
+        _remember_slot_confirm(key, _selected_slot_details(key), contact_present_before_confirm=_contact_present(ctx), revalidation_result="not_called")
         _remember_contact_parse(key, current_stage, "method_only")
         return copy.ask_contact_phone()
-    _remember_contact_parse(key, current_stage, "rejected")
+    _remember_slot_confirm(key, _selected_slot_details(key), contact_present_before_confirm=_contact_present(ctx), revalidation_result="not_called")
+    _remember_contact_parse(key, current_stage, "invalid")
     return _contact_retry_prompt(key)
 
 

@@ -1,6 +1,11 @@
 import pytest
 
-from app.utils.booking_requirements import extract_contact, requests_email_contact, requests_phone_contact
+from app.utils.booking_requirements import (
+    confirms_current_phone,
+    extract_contact,
+    requests_email_contact,
+    requests_phone_contact,
+)
 
 
 @pytest.mark.parametrize(
@@ -51,7 +56,20 @@ def test_extract_contact_accepts_digit_and_spoken_phones(spoken, expected):
     assert email is None
 
 
-@pytest.mark.parametrize("spoken", ["un email", "un correo", "email", "correo electronico", "prefiero email"])
+@pytest.mark.parametrize(
+    "spoken",
+    [
+        "un email",
+        "un correo",
+        "email",
+        "correo electronico",
+        "prefiero email",
+        "correo.",
+        "un correo.",
+        "correo electrónico.",
+        "por correo.",
+    ],
+)
 def test_requests_email_contact_detects_intent_without_treating_it_as_email(spoken):
     assert extract_contact(spoken) == (None, None)
     assert requests_email_contact(spoken) is True
@@ -61,7 +79,12 @@ def test_requests_email_contact_ignores_real_email():
     assert requests_email_contact("mi email es marcos arroba ejemplo punto com") is False
 
 
-@pytest.mark.parametrize("spoken", ["un teléfono", "telefono", "móvil", "prefiero telefono", "por telefono"])
+@pytest.mark.parametrize("spoken", ["un teléfono", "telefono", "móvil", "prefiero telefono", "por telefono", "teléfono."])
 def test_requests_phone_contact_detects_intent_without_treating_it_as_phone(spoken):
     assert extract_contact(spoken) == (None, None)
     assert requests_phone_contact(spoken) is True
+
+
+@pytest.mark.parametrize("spoken", ["sí, a este número", "sí, a este número.", "si a este numero."])
+def test_confirms_current_phone_accepts_punctuated_stt(spoken):
+    assert confirms_current_phone(spoken) is True

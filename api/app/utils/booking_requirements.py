@@ -12,6 +12,12 @@ def normalize_text(value: str) -> str:
     return " ".join(text.split())
 
 
+def _contact_intent_text(value: str) -> str:
+    normalized = normalize_text(value)
+    normalized = re.sub(r"[¿?¡!.,;:]+", " ", normalized)
+    return " ".join(normalized.split())
+
+
 def is_physiotherapy_session(service: Optional[str]) -> bool:
     return normalize_text(service or "") == PHYSIO_SESSION
 
@@ -63,7 +69,7 @@ def extract_phone(value: str) -> Optional[str]:
 
 
 def confirms_current_phone(value: str) -> bool:
-    normalized = normalize_text(value)
+    normalized = _contact_intent_text(value)
     return normalized in {
         "si",
         "si a este numero",
@@ -78,7 +84,7 @@ def confirms_current_phone(value: str) -> bool:
 
 
 def requests_email_contact(value: str) -> bool:
-    normalized = normalize_text(value)
+    normalized = _contact_intent_text(value)
     if extract_email(value):
         return False
     return normalized in {
@@ -97,7 +103,7 @@ def requests_email_contact(value: str) -> bool:
 
 
 def requests_phone_contact(value: str) -> bool:
-    normalized = normalize_text(value)
+    normalized = _contact_intent_text(value)
     if extract_phone(value):
         return False
     return normalized in {
