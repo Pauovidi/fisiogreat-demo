@@ -38,11 +38,10 @@ def test_voice_no_slots_copy_mentions_validated_day():
 def test_voice_contact_prompt_is_complete():
     text = VOICE_COPY.ask_contact_with_phone_suggestion()
 
-    assert text == (
-        "Para enviarte la confirmación y el recordatorio, ¿uso este número "
-        "de llamada o me das otro teléfono o tu correo electrónico?"
-    )
+    assert text == "Para enviarte la confirmación y el recordatorio, dime una opción: este número, otro teléfono o correo electrónico."
+    assert "este número, otro teléfono o correo electrónico" in text
     assert "correo electrónico" in text
+    assert "otro teléfono tu correo" not in text.lower()
     assert not text.rstrip(" ?").endswith(("un", "o un", "un email", "email"))
     assert "un email" not in text
     assert "un..." not in text

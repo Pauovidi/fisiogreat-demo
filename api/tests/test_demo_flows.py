@@ -343,7 +343,7 @@ def test_voice_confirms_with_spoken_email_and_stores_normalized_contact():
     assert appointment["metadata"]["contact_channel_preference"] == "email"
 
 
-@pytest.mark.parametrize("contact_request", ["un email", "un correo"])
+@pytest.mark.parametrize("contact_request", ["un email", "un correo", "el correo", "correo electrónico", "mail", "mi mail", "otro teléfono"])
 def test_voice_awaiting_contact_accepts_email_request_then_spoken_email(contact_request):
     call_sid = f"CA-voice-email-request-{contact_request.replace(' ', '-')}"
     reset_state(call_sid)
@@ -354,19 +354,29 @@ def test_voice_awaiting_contact_accepts_email_request_then_spoken_email(contact_
     post_voice(call_sid, SpeechResult="jueves")
     post_voice(call_sid, SpeechResult="primera")
 
-    ask_email = post_voice(call_sid, SpeechResult=contact_request)
-    assert "perfecto, dime tu correo electrónico" in ask_email.text.lower()
-    assert CTX.get_stage(call_sid) == "awaiting_contact_email"
-    response = post_voice(call_sid, SpeechResult="mi email es marcos arroba ejemplo punto com")
+    ask_contact = post_voice(call_sid, SpeechResult=contact_request)
+    if contact_request == "otro teléfono":
+        assert "perfecto, dime el teléfono móvil" in ask_contact.text.lower()
+        assert CTX.get_stage(call_sid) == "awaiting_contact_phone"
+        response = post_voice(call_sid, SpeechResult="640 50 50 50")
+    else:
+        assert "perfecto, dime solo el correo electrónico" in ask_contact.text.lower()
+        assert CTX.get_stage(call_sid) == "awaiting_contact_email"
+        response = post_voice(call_sid, SpeechResult="mi email es marcos arroba ejemplo punto com")
 
     assert "gracias" in response.text.lower()
     appointment = next(iter(STORE.appointments.values()))
-    assert appointment["metadata"]["contact_email"] == "marcos@ejemplo.com"
+    if contact_request == "otro teléfono":
+        assert appointment["metadata"]["contact_phone"] == "640505050"
+    else:
+        assert appointment["metadata"]["contact_email"] == "marcos@ejemplo.com"
 
 
 @pytest.mark.parametrize(
     ("spoken", "expected"),
     [
+        ("mi mail es marcos arroba ejemplo punto com", "marcos@ejemplo.com"),
+        ("mi correo es marcos arroba ejemplo punto com", "marcos@ejemplo.com"),
         ("marcos arroba fisiobrade punto com", "marcos@fisiobrade.com"),
         ("marcos arroba uno punto com", "marcos@uno.com"),
         ("marcos punto castellano arroba gmail punto com", "marcos.castellano@gmail.com"),
@@ -421,7 +431,8 @@ def test_voice_awaiting_contact_email_reprompts_email_without_slot_fallback():
     post_voice(call_sid, SpeechResult="un correo")
     retry = post_voice(call_sid, SpeechResult="opción dos")
 
-    assert "no he entendido bien el correo" in retry.text.lower()
+    assert "correo completo" in retry.text.lower()
+    assert "hueco acaba de ocuparse" not in retry.text.lower()
     assert CTX.get_stage(call_sid) == "awaiting_contact_email"
     assert not STORE.appointments
 
@@ -442,6 +453,35 @@ def test_voice_reprompts_invalid_contact_without_booking():
     assert not STORE.appointments
 
 
+@pytest.mark.parametrize(
+    "spoken",
+    [
+        "marcos arroba ejemplo",
+        "mi mail es marcos arroba ejemplo dos como",
+        "marcos arroba fisiograde",
+        "marcos arroba ejemplo punto",
+    ],
+)
+def test_voice_incomplete_email_stays_in_email_stage_without_confirming(spoken):
+    call_sid = f"CA-voice-incomplete-email-{abs(hash(spoken))}"
+    reset_state(call_sid)
+
+    post_voice(call_sid)
+    post_voice(call_sid, SpeechResult="valoracion inicial")
+    post_voice(call_sid, SpeechResult="Pau Marco")
+    post_voice(call_sid, SpeechResult="jueves")
+    post_voice(call_sid, SpeechResult="primera")
+    post_voice(call_sid, SpeechResult="el correo")
+    response = post_voice(call_sid, SpeechResult=spoken)
+
+    text = response.text.lower()
+    assert "correo completo" in text
+    assert "hueco acaba de ocuparse" not in text
+    assert "no he podido confirmar" not in text
+    assert CTX.get_stage(call_sid) == "awaiting_contact_email"
+    assert not STORE.appointments
+
+
 def test_voice_contact_retry_copy_changes_and_requires_contact_before_thanks():
     call_sid = "CA-voice-contact-retry-copy"
     reset_state(call_sid)
@@ -455,11 +495,11 @@ def test_voice_contact_retry_copy_changes_and_requires_contact_before_thanks():
     first_retry = post_voice(call_sid, SpeechResult="Marcos Castellano")
     assert "marcos arroba ejemplo punto com" in first_retry.text.lower()
     second_retry = post_voice(call_sid, SpeechResult="marcos arroba ejemplo")
-    assert "sigo sin entenderlo" in second_retry.text.lower()
+    assert "sigo sin entender el correo" in second_retry.text.lower()
     assert "no lo he no lo he" not in second_retry.text.lower()
     thanks = post_voice(call_sid, SpeechResult="gracias")
     assert "necesito un teléfono o correo electrónico" in thanks.text.lower()
-    assert CTX.get_stage(call_sid) == "awaiting_contact"
+    assert CTX.get_stage(call_sid) == "awaiting_contact_email"
     assert not STORE.appointments
 
 
@@ -486,7 +526,7 @@ def test_voice_confirms_with_valid_phone_and_can_confirm_from_number():
     post_voice(from_sid, SpeechResult="jueves")
     prompt = post_voice(from_sid, SpeechResult="primera", From="+34640786765")
     assert "este número" in prompt.text.lower() or "este numero" in prompt.text.lower()
-    response = post_voice(from_sid, SpeechResult="si a este numero")
+    response = post_voice(from_sid, SpeechResult="este número")
 
     assert "gracias" in response.text.lower()
     appointment = next(iter(STORE.appointments.values()))

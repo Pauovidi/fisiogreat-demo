@@ -15,6 +15,7 @@ from ..utils.booking_requirements import (
     extract_email,
     extract_phone,
     is_physiotherapy_session,
+    looks_like_incomplete_email,
     requests_email_contact,
     requests_phone_contact,
 )
@@ -611,8 +612,9 @@ def _contact_retry_prompt(key: str) -> str:
 
 def _contact_email_retry_prompt(key: str) -> str:
     ctx = CTX.get(key) or {}
-    ctx["contact_parse_failures"] = int(ctx.get("contact_parse_failures") or 0) + 1
-    return copy.ask_contact_email_retry()
+    attempts = int(ctx.get("contact_parse_failures") or 0) + 1
+    ctx["contact_parse_failures"] = attempts
+    return copy.ask_contact_email_retry(attempts)
 
 
 def _contact_phone_retry_prompt(key: str) -> str:
@@ -776,7 +778,7 @@ async def _handle_contact_stage(key: str, user_text: str) -> str:
             _remember_contact_parse(key, current_stage, "email")
             return reply
         _remember_slot_confirm(key, _selected_slot_details(key), contact_present_before_confirm=_contact_present(ctx), revalidation_result="not_called")
-        _remember_contact_parse(key, current_stage, "invalid")
+        _remember_contact_parse(key, current_stage, "invalid_email" if looks_like_incomplete_email(user_text) else "invalid")
         return _contact_email_retry_prompt(key)
 
     if current_stage == "awaiting_contact_phone":
@@ -810,6 +812,11 @@ async def _handle_contact_stage(key: str, user_text: str) -> str:
         _remember_slot_confirm(key, _selected_slot_details(key), contact_present_before_confirm=_contact_present(ctx), revalidation_result="not_called")
         _remember_contact_parse(key, current_stage, "method_only")
         return copy.ask_contact_phone()
+    if looks_like_incomplete_email(user_text):
+        CTX.set_stage(key, "awaiting_contact_email")
+        _remember_slot_confirm(key, _selected_slot_details(key), contact_present_before_confirm=_contact_present(ctx), revalidation_result="not_called")
+        _remember_contact_parse(key, current_stage, "invalid_email")
+        return _contact_email_retry_prompt(key)
     _remember_slot_confirm(key, _selected_slot_details(key), contact_present_before_confirm=_contact_present(ctx), revalidation_result="not_called")
     _remember_contact_parse(key, current_stage, "invalid")
     return _contact_retry_prompt(key)

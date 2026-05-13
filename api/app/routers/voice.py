@@ -39,6 +39,7 @@ from ..utils.booking_requirements import (
     extract_email,
     extract_phone,
     is_physiotherapy_session,
+    looks_like_incomplete_email,
     requests_email_contact,
     requests_phone_contact,
 )
@@ -67,8 +68,8 @@ VOICE_HINTS = (
     "fisioterapia, fisio, primera visita, valoracion inicial, valoracion, seguimiento, sesion, "
     "lunes, martes, miércoles, miercoles, jueves, viernes, sábado, sabado, domingo, "
     "mañana, manana, pasado mañana, pasado manana, tarde, primera, segunda, tercera, uno, dos, tres, "
-    "correo, correo electrónico, email, arroba, punto, gmail, hotmail, outlook, com, es, "
-    "teléfono, telefono, móvil, movil, número, numero, más, mas, seis, siete, ocho, nueve, cero"
+    "correo, correo electrónico, email, e-mail, mail, arroba, punto, punto com, gmail, hotmail, outlook, com, es, "
+    "teléfono, telefono, móvil, movil, número, numero, este número, otro teléfono, más, mas, seis, siete, ocho, nueve, cero"
 )
 WEEKDAY_LABELS = [
     "lunes",
@@ -557,8 +558,9 @@ def _filter_failed_slot_labels(labels: List[str], failed_start: Optional[dt.date
 
 def _contact_email_retry_prompt(call_sid: str) -> str:
     ctx = CTX.get(call_sid) or {}
-    ctx["contact_parse_failures"] = int(ctx.get("contact_parse_failures") or 0) + 1
-    return copy.ask_contact_email_retry()
+    attempts = int(ctx.get("contact_parse_failures") or 0) + 1
+    ctx["contact_parse_failures"] = attempts
+    return copy.ask_contact_email_retry(attempts)
 
 
 def _contact_phone_retry_prompt(call_sid: str) -> str:
@@ -936,7 +938,7 @@ async def _handle_contact_stage(
             stats["contact_parse_result"] = "email"
             stats["branch"] = "contact_email_then_confirm"
             return await _confirm_selected_slot_with_contact(call_sid, stats)
-        stats["contact_parse_result"] = "invalid"
+        stats["contact_parse_result"] = "invalid_email" if looks_like_incomplete_email(user_text) else "invalid"
         stats["confirm_slot_revalidation_result"] = "not_called"
         stats["confirm_attempt_after_contact"] = False
         stats["selected_slot_present"] = bool(_selected_slot_details(call_sid))
@@ -991,6 +993,15 @@ async def _handle_contact_stage(
         stats["branch"] = "contact_phone_requested"
         stats["stage_after"] = "awaiting_contact_phone"
         return _respond_gather(call_sid, copy.ask_contact_phone(), stats)
+    if looks_like_incomplete_email(user_text):
+        CTX.set_stage(call_sid, "awaiting_contact_email")
+        stats["contact_parse_result"] = "invalid_email"
+        stats["confirm_slot_revalidation_result"] = "not_called"
+        stats["confirm_attempt_after_contact"] = False
+        stats["selected_slot_present"] = bool(_selected_slot_details(call_sid))
+        stats["branch"] = "contact_email_incomplete"
+        stats["stage_after"] = "awaiting_contact_email"
+        return _respond_gather(call_sid, _contact_email_retry_prompt(call_sid), stats)
 
     stats["contact_parse_result"] = "invalid"
     stats["confirm_slot_revalidation_result"] = "not_called"

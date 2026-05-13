@@ -360,7 +360,25 @@ def test_conversationrelay_accepts_spoken_email_contact_and_confirms():
     assert CTX.get_stage(call_sid) == "completed"
 
 
-@pytest.mark.parametrize("contact_request", ["un email", "un correo", "correo", "correo.", "email", "por correo", "correo electrónico"])
+@pytest.mark.parametrize(
+    "contact_request",
+    [
+        "un email",
+        "el email",
+        "un correo",
+        "el correo",
+        "correo",
+        "correo.",
+        "email",
+        "mail",
+        "mi mail",
+        "e-mail",
+        "por correo",
+        "prefiero mail",
+        "correo electrónico",
+        "el correo electrónico",
+    ],
+)
 def test_conversationrelay_awaiting_contact_accepts_email_request_then_spoken_email(contact_request):
     call_sid = f"CA-conversationrelay-email-request-{contact_request.replace(' ', '-')}"
     reset_state(call_sid)
@@ -377,7 +395,7 @@ def test_conversationrelay_awaiting_contact_accepts_email_request_then_spoken_em
         })
         confirm = websocket.receive_json()
 
-    assert "perfecto, dime tu correo electrónico" in ask_email["token"].lower()
+    assert "perfecto, dime solo el correo electrónico" in ask_email["token"].lower()
     assert CTX.get_stage(call_sid) == "completed"
     assert "gracias" in confirm["token"].lower()
     appointment = next(iter(STORE.appointments.values()))
@@ -388,6 +406,8 @@ def test_conversationrelay_awaiting_contact_accepts_email_request_then_spoken_em
     ("spoken", "expected"),
     [
         ("marcos@example.com", "marcos@example.com"),
+        ("mi mail es marcos arroba ejemplo punto com", "marcos@ejemplo.com"),
+        ("mi correo es marcos arroba ejemplo punto com", "marcos@ejemplo.com"),
         ("marcos arroba fisiobrade punto com", "marcos@fisiobrade.com"),
         ("marcos arroba uno punto com", "marcos@uno.com"),
     ],
@@ -436,7 +456,8 @@ def test_conversationrelay_awaiting_contact_email_reprompts_email_without_slot_f
         websocket.send_json({"type": "prompt", "voicePrompt": "opción dos", "last": True})
         retry = websocket.receive_json()
 
-    assert "no he entendido bien el correo" in retry["token"].lower()
+    assert "correo completo" in retry["token"].lower()
+    assert "hueco acaba de ocuparse" not in retry["token"].lower()
     assert CTX.get_stage(call_sid) == "awaiting_contact_email"
     assert not STORE.appointments
 
@@ -468,8 +489,37 @@ def test_conversationrelay_invalid_contact_never_reports_slot_taken():
         retry = websocket.receive_json()
 
     assert "hueco acaba de ocuparse" not in retry["token"].lower()
+    assert "no he podido confirmar" not in retry["token"].lower()
     assert "marcos arroba ejemplo punto com" in retry["token"].lower()
-    assert CTX.get_stage(call_sid) == "awaiting_contact"
+    assert CTX.get_stage(call_sid) == "awaiting_contact_email"
+    assert not STORE.appointments
+
+
+@pytest.mark.parametrize(
+    "spoken",
+    [
+        "marcos arroba ejemplo",
+        "mi mail es marcos arroba ejemplo dos como",
+        "marcos arroba fisiograde",
+        "marcos arroba ejemplo punto",
+    ],
+)
+def test_conversationrelay_incomplete_email_stays_in_email_stage_without_confirming(spoken):
+    call_sid = f"CA-conversationrelay-incomplete-email-{abs(hash(spoken))}"
+    reset_state(call_sid)
+
+    with client.websocket_connect("/webhook/voice/conversationrelay/ws") as websocket:
+        drive_conversationrelay_to_contact(websocket, call_sid)
+        websocket.send_json({"type": "prompt", "voicePrompt": "el correo", "last": True})
+        websocket.receive_json()
+        websocket.send_json({"type": "prompt", "voicePrompt": spoken, "last": True})
+        retry = websocket.receive_json()
+
+    token = retry["token"].lower()
+    assert "correo completo" in token
+    assert "hueco acaba de ocuparse" not in token
+    assert "no he podido confirmar" not in token
+    assert CTX.get_stage(call_sid) == "awaiting_contact_email"
     assert not STORE.appointments
 
 
@@ -596,10 +646,10 @@ def test_conversationrelay_contact_retry_copy_is_helpful_and_not_duplicated():
         pending_contact = websocket.receive_json()
 
     assert "marcos arroba ejemplo punto com" in first_retry["token"].lower()
-    assert "sigo sin entenderlo" in second_retry["token"].lower()
+    assert "sigo sin entender el correo" in second_retry["token"].lower()
     assert "no lo he no lo he" not in second_retry["token"].lower()
     assert "necesito un teléfono o correo electrónico" in pending_contact["token"].lower()
-    assert CTX.get_stage(call_sid) == "awaiting_contact"
+    assert CTX.get_stage(call_sid) == "awaiting_contact_email"
     assert not STORE.appointments
 
 
@@ -625,7 +675,7 @@ def test_conversationrelay_accepts_phone_contact_and_suggested_from_number():
             setup_payload={"from": "+34640505050"},
         )
         assert "este número" in ask_contact["token"].lower() or "este numero" in ask_contact["token"].lower()
-        websocket.send_json({"type": "prompt", "voicePrompt": "si a este numero", "last": True})
+        websocket.send_json({"type": "prompt", "voicePrompt": "este número", "last": True})
         confirm_from = websocket.receive_json()
 
     assert "gracias" in confirm_from["token"].lower()

@@ -73,7 +73,9 @@ def confirms_current_phone(value: str) -> bool:
     return normalized in {
         "si",
         "si a este numero",
+        "si este numero",
         "si en este numero",
+        "este numero",
         "a este numero",
         "ese numero",
         "al mismo numero",
@@ -89,13 +91,25 @@ def requests_email_contact(value: str) -> bool:
         return False
     return normalized in {
         "email",
+        "el email",
         "un email",
+        "e-mail",
+        "e mail",
+        "el e-mail",
+        "el e mail",
+        "mail",
+        "mi mail",
         "correo",
+        "el correo",
         "un correo",
         "correo electronico",
+        "el correo electronico",
         "un correo electronico",
         "prefiero email",
+        "prefiero mail",
+        "prefiero correo",
         "por email",
+        "por mail",
         "mejor email",
         "por correo",
         "mejor por correo",
@@ -123,9 +137,28 @@ def requests_phone_contact(value: str) -> bool:
     }
 
 
+def looks_like_incomplete_email(value: str) -> bool:
+    if extract_email(value):
+        return False
+    normalized = _contact_intent_text(value)
+    padded = f" {normalized} "
+    if "@" in (value or "") or " arroba " in padded:
+        return True
+    return normalized.startswith(
+        (
+            "mi email es ",
+            "mi e-mail es ",
+            "mi e mail es ",
+            "mi mail es ",
+            "mi correo es ",
+            "mi correo electronico es ",
+        )
+    )
+
+
 EMAIL_PREFIX_PATTERNS = [
-    r"^(?:mi\s+)?(?:e\s*-?\s*mail|email|correo|correo electronico)\s+(?:es\s+)?",
-    r"^(?:el\s+)?(?:e\s*-?\s*mail|email|correo|correo electronico)\s+(?:es\s+)?",
+    r"^(?:mi\s+)?(?:correo\s+electronico|e\s*-?\s*mail|email|mail|correo)\s+(?:es\s+)?",
+    r"^(?:el\s+)?(?:correo\s+electronico|e\s*-?\s*mail|email|mail|correo)\s+(?:es\s+)?",
     r"^apuntalo\s+en\s+",
     r"^apuntamelo\s+en\s+",
     r"^envialo\s+a\s+",

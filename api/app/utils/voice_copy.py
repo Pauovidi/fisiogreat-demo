@@ -96,19 +96,21 @@ class VoiceCopy:
 
     @staticmethod
     def ask_contact() -> str:
-        return "Para enviarte la confirmación y el recordatorio, ¿me das un teléfono móvil o tu correo electrónico?"
+        return "Para enviarte la confirmación y el recordatorio, dime una opción: este número, otro teléfono o correo electrónico."
 
     @staticmethod
     def ask_contact_with_phone_suggestion() -> str:
-        return "Para enviarte la confirmación y el recordatorio, ¿uso este número de llamada o me das otro teléfono o tu correo electrónico?"
+        return "Para enviarte la confirmación y el recordatorio, dime una opción: este número, otro teléfono o correo electrónico."
 
     @staticmethod
     def ask_contact_email() -> str:
-        return "Perfecto, dime tu correo electrónico. Puedes decirlo como marcos arroba ejemplo punto com."
+        return "Perfecto, dime solo el correo electrónico. Por ejemplo: marcos arroba ejemplo punto com."
 
     @staticmethod
-    def ask_contact_email_retry() -> str:
-        return "Perdona, no he entendido bien el correo. Puedes decirlo como marcos arroba ejemplo punto com."
+    def ask_contact_email_retry(attempt: int = 1) -> str:
+        if attempt <= 1:
+            return "No he captado el correo completo. Dímelo solo así: marcos arroba ejemplo punto com."
+        return "Sigo sin entender el correo. Si prefieres, dime un teléfono móvil."
 
     @staticmethod
     def ask_contact_phone() -> str:
